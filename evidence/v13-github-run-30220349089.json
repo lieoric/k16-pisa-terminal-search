@@ -1,0 +1,62 @@
+{
+  "model_version": "k16-pisa-v13-github-adaptive-pilot-20260727",
+  "run_id": 30220349089,
+  "run_url": "https://github.com/lieoric/k16-pisa-terminal-search/actions/runs/30220349089",
+  "conclusion": "success",
+  "parents_expected": [1, 1399, 2797, 4195, 5594, 6992],
+  "parents_returned": [1, 1399, 2797, 4195, 5594, 6992],
+  "split_depth": 4,
+  "children_per_parent": 16,
+  "children_total": 96,
+  "parents_closed": [],
+  "counts": {
+    "sat": 0,
+    "unsat": 12,
+    "unknown": 84,
+    "error": 0
+  },
+  "parents": [
+    {
+      "parent_line": 1,
+      "parent_literals": 76,
+      "split_variables": [17, 18, 19, 20],
+      "counts": {"sat": 0, "unsat": 1, "unknown": 15, "error": 0},
+      "parent_closed": false
+    },
+    {
+      "parent_line": 1399,
+      "parent_literals": 64,
+      "split_variables": [17, 18, 19, 20],
+      "counts": {"sat": 0, "unsat": 0, "unknown": 16, "error": 0},
+      "parent_closed": false
+    },
+    {
+      "parent_line": 2797,
+      "parent_literals": 72,
+      "split_variables": [17, 18, 19, 20],
+      "counts": {"sat": 0, "unsat": 0, "unknown": 16, "error": 0},
+      "parent_closed": false
+    },
+    {
+      "parent_line": 4195,
+      "parent_literals": 64,
+      "split_variables": [17, 18, 19, 20],
+      "counts": {"sat": 0, "unsat": 0, "unknown": 16, "error": 0},
+      "parent_closed": false
+    },
+    {
+      "parent_line": 5594,
+      "parent_literals": 64,
+      "split_variables": [17, 18, 19, 20],
+      "counts": {"sat": 0, "unsat": 0, "unknown": 16, "error": 0},
+      "parent_closed": false
+    },
+    {
+      "parent_line": 6992,
+      "parent_literals": 64,
+      "split_variables": [17, 18, 19, 20],
+      "counts": {"sat": 0, "unsat": 11, "unknown": 5, "error": 0},
+      "parent_closed": false
+    }
+  ]
+}

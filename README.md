@@ -356,3 +356,11 @@ python scripts/kaggle_v13_adaptive_pilot.py
 
 Both routes rebuild and validate the same complete 9,788-cube SMS partition
 before refinement, and preserve JSON/log artifacts for every result.
+
+GitHub run
+[`30220349089`](https://github.com/lieoric/k16-pisa-terminal-search/actions/runs/30220349089)
+completed the 96-child pilot successfully.  It proved 12 children `UNSAT`
+and left 84 `UNKNOWN`, with no SAT witness and no errors.  Parent 6992 was
+reduced from one open cube to five open children (11 of 16 closed), while
+parent 1 lost one child.  No whole parent closed in this pilot.  The exact
+transcription is `evidence/v13-github-run-30220349089.json`.
