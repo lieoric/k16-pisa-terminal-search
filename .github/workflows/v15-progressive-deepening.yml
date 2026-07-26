@@ -1,0 +1,283 @@
+name: K16 Pisa v15 progressive split-and-deepen campaign
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Stopped/completed v14 run containing checkpoint artifacts
+        required: true
+        default: "30221642780"
+      source_artifact_pattern:
+        description: Artifact pattern holding the latest v14 checkpoints
+        required: true
+        default: "v14-stage1-shard-*"
+      slice_schedule:
+        description: Per-generation seconds; final value repeats forever
+        required: true
+        default: "180,1800,7200"
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  smoke:
+    name: Progressive schedule and source checkpoint gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v14-prepared-cutoff64
+          path: prepared
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ inputs.source_artifact_pattern }}
+          path: source
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Validate progressive budgets and all eight source checkpoints
+        env:
+          SLICE_SCHEDULE: ${{ inputs.slice_schedule }}
+        run: |
+          python -m py_compile scripts/resumable_refinement_v14.py
+          python - <<'PY'
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+          from types import SimpleNamespace
+
+          spec = importlib.util.spec_from_file_location(
+              "refiner", "scripts/resumable_refinement_v14.py"
+          )
+          refiner = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(refiner)
+
+          schedule = [int(x) for x in os.environ["SLICE_SCHEDULE"].split(",")]
+          args = SimpleNamespace(
+              source_split_depth=6,
+              pre_split_depth=3,
+              slice_schedule=schedule,
+          )
+          expected = [schedule[0], schedule[1], schedule[2], schedule[-1]]
+          observed = [
+              refiner.item_slice_seconds({"depth": depth}, args)
+              for depth in (9, 10, 11, 15)
+          ]
+          assert observed == expected, (observed, expected)
+
+          checkpoints = sorted(Path("source").rglob("checkpoint.json"))
+          summaries = sorted(Path("source").rglob("summary.json"))
+          assert len(checkpoints) == 8, len(checkpoints)
+          assert len(summaries) == 8, len(summaries)
+          for checkpoint_path in checkpoints:
+              checkpoint = json.loads(checkpoint_path.read_text())
+              assert checkpoint["model_version"].startswith(
+                  "k16-pisa-v14-resumable"
+              )
+              assert checkpoint["stats"]["errors"] == 0
+              assert "queue" in checkpoint
+              assert "closed_unsat" in checkpoint
+          print(
+              json.dumps(
+                  {
+                      "gate": "PASS",
+                      "schedule": schedule,
+                      "source_checkpoints": len(checkpoints),
+                  },
+                  indent=2,
+              )
+          )
+          PY
+          python scripts/rebalance_progressive_checkpoints_v15.py \
+            --source-dir source \
+            --output-dir seeded \
+            --target-shards 16 \
+            --slice-schedule "$SLICE_SCHEDULE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-rebalanced-seeds
+          path: seeded/
+          retention-days: 30
+
+  stage1:
+    name: Deepening stage 1 / shard ${{ matrix.shard }}
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v14-prepared-cutoff64
+          path: prepared
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: v15-rebalanced-seeds
+          path: results
+      - name: Split timeouts and deepen budgets for 5h08m
+        run: |
+          python scripts/resumable_refinement_v14.py \
+            --cnf prepared/k16-v12-hybrid.cnf \
+            --cube-file prepared/cutoff-64.cubes \
+            --manifest campaigns/v14-kaggle-338156810-residuals.json \
+            --checkpoint "results/shard-${{ matrix.shard }}/checkpoint.json" \
+            --output "results/shard-${{ matrix.shard }}/summary.json" \
+            --partition-count 2 \
+            --partition-index 0 \
+            --shard-count 16 \
+            --shard-index "${{ matrix.shard }}" \
+            --pre-split-depth 3 \
+            --slice-schedule "${{ inputs.slice_schedule }}" \
+            --queue-policy balanced \
+            --wall-seconds 18500 \
+            --workers 4
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-stage1-shard-${{ matrix.shard }}
+          path: results/shard-${{ matrix.shard }}/
+          retention-days: 30
+
+  stage2:
+    name: Deepening stage 2 / shard ${{ matrix.shard }}
+    needs: [smoke, stage1]
+    runs-on: ubuntu-latest
+    timeout-minutes: 190
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v14-prepared-cutoff64
+          path: prepared
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: v15-stage1-shard-${{ matrix.shard }}
+          path: results/shard-${{ matrix.shard }}
+      - name: Resume split-and-deepen search for another 2h46m
+        run: |
+          python scripts/resumable_refinement_v14.py \
+            --cnf prepared/k16-v12-hybrid.cnf \
+            --cube-file prepared/cutoff-64.cubes \
+            --manifest campaigns/v14-kaggle-338156810-residuals.json \
+            --checkpoint "results/shard-${{ matrix.shard }}/checkpoint.json" \
+            --output "results/shard-${{ matrix.shard }}/summary.json" \
+            --partition-count 2 \
+            --partition-index 0 \
+            --shard-count 16 \
+            --shard-index "${{ matrix.shard }}" \
+            --pre-split-depth 3 \
+            --slice-schedule "${{ inputs.slice_schedule }}" \
+            --queue-policy balanced \
+            --wall-seconds 10000 \
+            --workers 4
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-final-shard-${{ matrix.shard }}
+          path: results/shard-${{ matrix.shard }}/
+          retention-days: 30
+
+  aggregate:
+    name: Aggregate progressive frontier
+    needs: stage2
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v15-final-shard-*
+          path: final
+      - name: Aggregate exact status
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          summaries = [
+              json.loads(path.read_text())
+              for path in sorted(Path("final").rglob("summary.json"))
+          ]
+          result = {
+              "model_version": "k16-pisa-v15-progressive-deepening",
+              "shards_expected": 16,
+              "shards_returned": len(summaries),
+              "sat_shards": [
+                  i for i, s in enumerate(summaries)
+                  if s["status"] == "SAT"
+              ],
+              "closed_shards": sum(
+                  s["status"] == "CLOSED" for s in summaries
+              ),
+              "checkpointed_shards": sum(
+                  s["status"] == "CHECKPOINTED" for s in summaries
+              ),
+              "selected_roots": sum(
+                  s["progress"]["selected_root_count"] for s in summaries
+              ),
+              "roots_closed": sum(
+                  s["progress"]["roots_closed"] for s in summaries
+              ),
+              "pending_leaves": sum(
+                  s["progress"]["pending_leaves"] for s in summaries
+              ),
+              "unsat_leaves": sum(
+                  s["progress"]["closed_unsat_leaves"] for s in summaries
+              ),
+              "attempts_by_budget": {},
+              "timeouts_by_budget": {},
+              "errors": sum(s["stats"]["errors"] for s in summaries),
+              "note": (
+                  "UNKNOWN descendants remain an exact checkpointed cover. "
+                  "A timeout was split before its deeper budget tier."
+              ),
+              "shards": summaries,
+          }
+          for summary in summaries:
+              for field in ("attempts_by_budget", "timeouts_by_budget"):
+                  for budget, count in summary["stats"].get(field, {}).items():
+                      result[field][budget] = (
+                          result[field].get(budget, 0) + count
+                      )
+          Path("v15-progressive-summary.json").write_text(
+              json.dumps(result, indent=2) + "\n"
+          )
+          print(json.dumps(result, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-progressive-summary
+          path: v15-progressive-summary.json
+          retention-days: 30

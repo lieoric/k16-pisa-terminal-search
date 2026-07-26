@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,7 @@ INPUT_ROOT = Path("/kaggle/input")
 SMS_COMMIT = "464f12f1fd36b496e7ba9dcbb622b079de02dce4"
 TOTAL_BUDGET_SECONDS = 8 * 60 * 60
 SHUTDOWN_RESERVE_SECONDS = 15 * 60
+SLICE_SCHEDULE = os.environ.get("K16_SLICE_SCHEDULE", "180")
 
 
 def run(command: list[str], *, cwd: Path | None = None) -> None:
@@ -200,7 +202,7 @@ def main() -> int:
                 "solver_wall_seconds": solver_wall,
                 "partition": "odd source indexes (disjoint from GitHub)",
                 "workers": 4,
-                "slice_seconds": 180,
+                "slice_schedule": SLICE_SCHEDULE,
             }
         ),
         flush=True,
@@ -233,8 +235,10 @@ def main() -> int:
             "0",
             "--pre-split-depth",
             "3",
-            "--slice-seconds",
-            "180",
+            "--slice-schedule",
+            SLICE_SCHEDULE,
+            "--queue-policy",
+            os.environ.get("K16_QUEUE_POLICY", "balanced"),
             "--wall-seconds",
             str(solver_wall),
             "--workers",

@@ -5,6 +5,11 @@ The queue is an exact disjoint cover of the selected v13 UNKNOWN children.
 Every timed-out leaf is replaced by its two children on one still-free
 unordered tournament edge.  Confirmed UNSAT leaves are never retried.
 
+An optional progressive schedule assigns larger time budgets to deeper
+children.  For example, ``180,1800,7200`` means: try an initial leaf for
+three minutes, split a timeout and try each child for thirty minutes, then
+split another timeout and give every deeper descendant two hours.
+
 The checkpoint persists mathematical coverage, not a solver's private CDCL
 state.  Restarting therefore loses only learned clauses from the current
 process, never a proved UNSAT leaf or a pending portion of the search space.
@@ -81,6 +86,73 @@ def choose_split_variables(
             f"cannot split by {depth}"
         )
     return candidates[:depth]
+
+
+def free_split_variables(
+    assumptions: list[int],
+    n: int,
+) -> list[int]:
+    assigned = {abs(literal) for literal in assumptions}
+    candidates = []
+    for u in range(n):
+        for v in range(u + 1, n):
+            uv = arc_var(n, u, v)
+            vu = arc_var(n, v, u)
+            if uv not in assigned and vu not in assigned:
+                candidates.append(uv)
+    return candidates
+
+
+def propagation_split_variable(
+    solver: Solver,
+    assumptions: list[int],
+    n: int,
+    candidate_limit: int = 32,
+) -> tuple[int, dict[int, dict[str, Any]]]:
+    """Choose a balanced split using cheap two-polarity propagation.
+
+    This is a lightweight propagation-rate heuristic in the spirit of
+    Cube-and-Conquer.  Exactness does not depend on the score: every returned
+    variable is still split into both exhaustive polarities.
+    """
+
+    candidates = free_split_variables(assumptions, n)
+    if not candidates:
+        raise ValueError("no free unordered tournament edge remains")
+    if len(candidates) > candidate_limit:
+        last = len(candidates) - 1
+        indexes = {
+            round(index * last / (candidate_limit - 1))
+            for index in range(candidate_limit)
+        }
+        candidates = [candidates[index] for index in sorted(indexes)]
+
+    best_variable = candidates[0]
+    best_score = (-1, -1, -1)
+    best_profiles: dict[int, dict[str, Any]] = {}
+    for variable in candidates:
+        branch_sizes = []
+        conflicts = 0
+        profiles = {}
+        for literal in (variable, -variable):
+            consistent, propagated = solver.propagate(
+                assumptions=assumptions + [literal]
+            )
+            if not consistent:
+                conflicts += 1
+            propagated_count = len(propagated or [])
+            branch_sizes.append(propagated_count)
+            profiles[literal] = {
+                "consistent": bool(consistent),
+                "propagated": propagated_count,
+            }
+        low, high = sorted(branch_sizes)
+        score = (conflicts, low, (low + 1) * (high + 1))
+        if score > best_score:
+            best_score = score
+            best_variable = variable
+            best_profiles = profiles
+    return best_variable, best_profiles
 
 
 def model_to_masks(model: list[int], n: int) -> list[int]:
@@ -238,6 +310,10 @@ def new_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
             "errors": 0,
             "solver_seconds": 0.0,
             "sessions": 0,
+            "attempts_by_budget": {},
+            "timeouts_by_budget": {},
+            "batches": 0,
+            "unit_unsat_children": 0,
         },
         "sessions": [],
     }
@@ -270,6 +346,7 @@ def _worker_solve(
 ) -> dict[str, Any]:
     if WORKER_SOLVER is None:
         raise RuntimeError("worker solver was not initialized")
+    before = WORKER_SOLVER.accum_stats()
     started = time.perf_counter()
     timer = threading.Timer(timeout_seconds, WORKER_SOLVER.interrupt)
     timer.daemon = True
@@ -283,16 +360,33 @@ def _worker_solve(
         timer.cancel()
         WORKER_SOLVER.clear_interrupt()
     elapsed = round(time.perf_counter() - started, 3)
+    after = WORKER_SOLVER.accum_stats()
+    counters = {
+        name: int(after.get(name, 0)) - int(before.get(name, 0))
+        for name in ("conflicts", "decisions", "propagations")
+    }
     if result is None:
-        return {"status": "UNKNOWN", "seconds": elapsed}
+        split_variable, branch_profiles = propagation_split_variable(
+            WORKER_SOLVER,
+            assumptions,
+            WORKER_N,
+        )
+        return {
+            "status": "UNKNOWN",
+            "seconds": elapsed,
+            **counters,
+            "split_var": split_variable,
+            "branch_profiles": branch_profiles,
+        }
     if result is False:
-        return {"status": "UNSAT", "seconds": elapsed}
+        return {"status": "UNSAT", "seconds": elapsed, **counters}
     check = verify(model_to_masks(WORKER_SOLVER.get_model(), WORKER_N))
     if not check["is_pisa"]:
         raise RuntimeError("SAT model failed independent Pisa verification")
     return {
         "status": "SAT",
         "seconds": elapsed,
+        **counters,
         "verified": True,
         "witness": check,
     }
@@ -315,26 +409,112 @@ def split_item(
     item: dict[str, Any],
     assumptions: list[int],
     n: int,
+    variable: int | None = None,
+    branch_profiles: dict[int, dict[str, Any]] | None = None,
+    parent_result: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    variable = choose_split_variables(assumptions, n, 1)[0]
+    free_variables = free_split_variables(assumptions, n)
+    if variable is None:
+        variable = free_variables[0]
+    if variable not in free_variables:
+        raise ValueError(f"invalid split variable {variable}")
+    branch_profiles = branch_profiles or {}
+    propagated = {
+        literal: int(
+            branch_profiles.get(literal, {}).get("propagated", 0)
+        )
+        for literal in (variable, -variable)
+    }
     children = []
     for bit, literal in (("0", -variable), ("1", variable)):
+        sibling_literal = -literal
+        relative_hardness = (
+            (propagated[sibling_literal] + 1)
+            / (propagated[literal] + 1)
+        ) ** 0.5
+        budget_factor = max(0.5, min(2.0, relative_hardness))
         children.append(
             {
                 **item,
                 "path": str(item["path"]) + bit,
                 "refinements": list(item["refinements"]) + [literal],
                 "depth": int(item["depth"]) + 1,
+                "difficulty": {
+                    "budget_factor": round(budget_factor, 4),
+                    "lookahead_propagated": propagated[literal],
+                    "sibling_propagated": propagated[sibling_literal],
+                    "parent_conflicts": int(
+                        (parent_result or {}).get("conflicts", 0)
+                    ),
+                    "parent_seconds": float(
+                        (parent_result or {}).get("seconds", 0.0)
+                    ),
+                },
             }
         )
     return children
+
+
+def refinement_generation(
+    item: dict[str, Any],
+    args: argparse.Namespace,
+) -> int:
+    initial_depth = args.source_split_depth + args.pre_split_depth
+    return max(0, int(item["depth"]) - initial_depth)
+
+
+def item_slice_seconds(
+    item: dict[str, Any],
+    args: argparse.Namespace,
+) -> int:
+    generation = refinement_generation(item, args)
+    schedule = args.slice_schedule
+    base = int(schedule[min(generation, len(schedule) - 1)])
+    factor = float(
+        item.get("difficulty", {}).get("budget_factor", 1.0)
+    )
+    adaptive = max(1, round(base * factor))
+    return min(max(schedule), adaptive)
+
+
+def select_batch(
+    queue: list[dict[str, Any]],
+    args: argparse.Namespace,
+    batch_number: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    """Choose between cumulative closure and deep survivor lanes."""
+
+    lane = "closure"
+    reverse = False
+    if args.queue_policy == "survivor":
+        lane = "survivor"
+        reverse = True
+    elif args.queue_policy == "balanced" and batch_number % 4 == 0:
+        lane = "survivor"
+        reverse = True
+
+    ranked = sorted(
+        queue,
+        key=lambda item: (
+            refinement_generation(item, args),
+            item_slice_seconds(item, args),
+            item_id(item),
+        ),
+        reverse=reverse,
+    )
+    batch = ranked[: args.workers]
+    selected = {item_id(item) for item in batch}
+    remainder = [
+        item for item in queue if item_id(item) not in selected
+    ]
+    return batch, remainder, lane
 
 
 def compact_unsat_record(
     item: dict[str, Any],
     result: dict[str, Any],
 ) -> dict[str, Any]:
-    return {
+    record = {
         "id": item_id(item),
         "parent_line": int(item["parent_line"]),
         "pattern": int(item["pattern"]),
@@ -343,6 +523,9 @@ def compact_unsat_record(
         "depth": int(item["depth"]),
         "seconds": float(result["seconds"]),
     }
+    if result.get("proof"):
+        record["proof"] = str(result["proof"])
+    return record
 
 
 def derive_progress(checkpoint: dict[str, Any]) -> dict[str, Any]:
@@ -412,9 +595,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "resumed": resumed,
         "wall_budget_seconds": args.wall_seconds,
         "slice_seconds": args.slice_seconds,
+        "slice_schedule": args.slice_schedule,
         "workers": args.workers,
         "starting_progress": derive_progress(checkpoint),
     }
+    checkpoint["stats"].setdefault("attempts_by_budget", {})
+    checkpoint["stats"].setdefault("timeouts_by_budget", {})
+    checkpoint["stats"].setdefault("batches", 0)
+    checkpoint["stats"].setdefault("unit_unsat_children", 0)
     checkpoint["stats"]["sessions"] += 1
     checkpoint["sessions"].append(session)
     save_state(checkpoint, args)
@@ -430,7 +618,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         signal.signal(signal.SIGINT, request_stop)
 
     started = time.monotonic()
-    reserve = max(30, args.slice_seconds + 10)
     with ProcessPoolExecutor(
         max_workers=args.workers,
         initializer=_init_worker,
@@ -438,27 +625,37 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     ) as executor:
         while checkpoint["queue"] and not checkpoint["found"]:
             elapsed = time.monotonic() - started
+            batch_number = int(checkpoint["stats"]["batches"]) + 1
+            batch, remainder, lane = select_batch(
+                checkpoint["queue"],
+                args,
+                batch_number,
+            )
+            batch_budgets = [
+                item_slice_seconds(item, args) for item in batch
+            ]
+            reserve = max(30, max(batch_budgets) + 10)
             if (
                 stop_requested
                 or elapsed + reserve >= args.wall_seconds
             ):
                 break
 
-            batch = checkpoint["queue"][: args.workers]
-            del checkpoint["queue"][: len(batch)]
+            checkpoint["queue"] = remainder
+            checkpoint["stats"]["batches"] = batch_number
             futures = {}
-            for item in batch:
+            for item, slice_seconds in zip(batch, batch_budgets):
                 assumptions = assumptions_for_item(item, args)
                 future = executor.submit(
                     _worker_solve,
                     assumptions,
-                    args.slice_seconds,
+                    slice_seconds,
                 )
-                futures[future] = (item, assumptions)
+                futures[future] = (item, assumptions, slice_seconds)
 
             batch_results = []
             for future in as_completed(futures):
-                item, assumptions = futures[future]
+                item, assumptions, slice_seconds = futures[future]
                 try:
                     result = future.result()
                 except Exception as error:
@@ -467,12 +664,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         "seconds": 0.0,
                         "error": repr(error),
                     }
-                batch_results.append((item, assumptions, result))
+                batch_results.append(
+                    (item, assumptions, slice_seconds, result)
+                )
 
             batch_results.sort(key=lambda entry: item_id(entry[0]))
-            for item, assumptions, result in batch_results:
+            for item, assumptions, slice_seconds, result in batch_results:
                 status = result["status"]
                 checkpoint["stats"]["attempts"] += 1
+                budget_key = str(slice_seconds)
+                attempts_by_budget = checkpoint["stats"][
+                    "attempts_by_budget"
+                ]
+                attempts_by_budget[budget_key] = (
+                    int(attempts_by_budget.get(budget_key, 0)) + 1
+                )
                 checkpoint["stats"]["solver_seconds"] = round(
                     float(checkpoint["stats"]["solver_seconds"])
                     + float(result.get("seconds", 0.0)),
@@ -489,10 +695,49 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         "result": result,
                     }
                 elif status == "UNKNOWN":
-                    checkpoint["queue"].extend(
-                        split_item(item, assumptions, args.n)
+                    raw_profiles = result.get("branch_profiles", {})
+                    branch_profiles = {
+                        int(literal): profile
+                        for literal, profile in raw_profiles.items()
+                    }
+                    children = split_item(
+                        item,
+                        assumptions,
+                        args.n,
+                        int(result["split_var"]),
+                        branch_profiles,
+                        result,
                     )
+                    for child in children:
+                        literal = int(child["refinements"][-1])
+                        profile = branch_profiles.get(literal, {})
+                        if not profile.get("consistent", True):
+                            checkpoint["closed_unsat"].append(
+                                compact_unsat_record(
+                                    child,
+                                    {
+                                        "status": "UNSAT",
+                                        "seconds": 0.0,
+                                        "proof": (
+                                            "unit propagation after "
+                                            "timed parent solve"
+                                        ),
+                                    },
+                                )
+                            )
+                            checkpoint["stats"]["unsat_leaves"] += 1
+                            checkpoint["stats"][
+                                "unit_unsat_children"
+                            ] += 1
+                        else:
+                            checkpoint["queue"].append(child)
                     checkpoint["stats"]["timeouts_split"] += 1
+                    timeouts_by_budget = checkpoint["stats"][
+                        "timeouts_by_budget"
+                    ]
+                    timeouts_by_budget[budget_key] = (
+                        int(timeouts_by_budget.get(budget_key, 0)) + 1
+                    )
                 else:
                     checkpoint["queue"].append(item)
                     checkpoint["stats"]["errors"] += 1
@@ -510,6 +755,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     item_id(item),
                     status,
                     result.get("seconds"),
+                    "conflicts",
+                    result.get("conflicts"),
+                    "generation",
+                    refinement_generation(item, args),
+                    "budget",
+                    slice_seconds,
+                    "lane",
+                    lane,
                     "pending",
                     len(checkpoint["queue"]),
                     flush=True,
@@ -539,8 +792,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--slice-seconds", type=int, default=180)
+    parser.add_argument(
+        "--slice-schedule",
+        default="",
+        help=(
+            "Comma-separated per-generation budgets. The last value is "
+            "reused for every deeper generation. Example: 180,1800,7200. "
+            "If omitted, --slice-seconds is used at every depth."
+        ),
+    )
     parser.add_argument("--wall-seconds", type=int, default=3600)
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument(
+        "--queue-policy",
+        choices=("closure", "survivor", "balanced"),
+        default="balanced",
+        help=(
+            "closure prefers shallow leaves, survivor follows deepest "
+            "timeouts, and balanced sends every fourth batch down the "
+            "survivor lane."
+        ),
+    )
     parser.add_argument(
         "--solver",
         default="glucose42",
@@ -554,6 +826,23 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.slice_schedule:
+        try:
+            args.slice_schedule = [
+                int(piece.strip())
+                for piece in args.slice_schedule.split(",")
+                if piece.strip()
+            ]
+        except ValueError as error:
+            raise SystemExit(
+                "--slice-schedule must contain integers"
+            ) from error
+    else:
+        args.slice_schedule = [args.slice_seconds]
+    if not args.slice_schedule or any(
+        seconds < 1 for seconds in args.slice_schedule
+    ):
+        raise SystemExit("--slice-schedule budgets must be positive")
     for name in ("partition", "shard"):
         count = getattr(args, f"{name}_count")
         index = getattr(args, f"{name}_index")
@@ -563,8 +852,11 @@ def main() -> int:
         raise SystemExit("--workers must be positive")
     if args.slice_seconds < 1:
         raise SystemExit("--slice-seconds must be positive")
-    if args.wall_seconds <= args.slice_seconds + 30:
-        raise SystemExit("wall budget must exceed one slice plus 30 seconds")
+    if args.wall_seconds <= min(args.slice_schedule) + 30:
+        raise SystemExit(
+            "wall budget must exceed the shortest scheduled slice "
+            "plus 30 seconds"
+        )
 
     checkpoint = run(args)
     print(

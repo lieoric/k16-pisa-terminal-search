@@ -394,3 +394,38 @@ GitHub-hosted jobs have a six-hour limit, so
 2h46m continuation stage for each of eight parallel shards. The complementary
 Kaggle half is in `kaggle/k16_pisa_v14_resumable_8h.ipynb`; it leaves
 `kaggle-v14-checkpoint.json` in notebook output for a later continuation run.
+
+## v15 progressive split-and-deepen continuation
+
+v15 resumes the exact v14 checkpoints instead of reconstructing or retrying
+closed leaves. It uses a breadth-first progressive schedule:
+
+1. an unrefined pending leaf receives 180 seconds;
+2. a timeout is replaced by its two exhaustive children, each with a
+   1,800-second budget;
+3. another timeout is split again, and every deeper descendant receives
+   7,200 seconds.
+
+The last budget repeats at later depths. A verified SAT witness ends the
+campaign; an UNSAT leaf is permanently removed; UNKNOWN remains an exact
+checkpointed cover rather than being reported as a conclusion.
+
+Splitting is no longer the first free edge in numeric order. After a timeout,
+the worker probes both polarities of a deterministic sample of free tournament
+edges and chooses the most balanced propagation-producing edge. This is a
+lightweight propagation-rate cubing heuristic; both children are still kept,
+so the heuristic cannot affect exactness.
+
+The default scheduler has two exact lanes. Three batches prefer shallow leaves
+to accumulate quick UNSAT closures; every fourth batch follows the deepest
+repeated-timeout survivors and upgrades their time budget immediately. Each
+child receives an adaptive multiplier from its own lookahead propagation
+profile, so easy-to-tighten leaves get shorter budgets while weak-propagation
+survivors get longer ones. If lookahead already refutes one polarity, that
+child is closed as UNSAT without spending another full solve.
+
+`.github/workflows/v15-progressive-deepening.yml` accepts the completed v14
+workflow run ID and resumes all eight GitHub shards for another 5h08m plus
+2h46m. `kaggle-v15/` attaches the latest v14 notebook output, resumes
+`kaggle-v14-checkpoint.json`, and applies the same `180,1800,7200` schedule
+to the disjoint Kaggle half.
