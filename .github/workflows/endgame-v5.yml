@@ -15,10 +15,6 @@ on:
         description: Solver seconds for each disjoint global endpoint box
         required: true
         default: "900"
-  push:
-    branches:
-      - "agent/k16-endpoint-endgame"
-
 permissions:
   contents: read
   actions: read
