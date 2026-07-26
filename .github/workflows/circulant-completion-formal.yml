@@ -7,6 +7,9 @@ on:
         description: Exact CP-SAT seconds for each completion box
         required: true
         default: "1800"
+  push:
+    branches:
+      - "campaign/c16-circulant-completion"
 
 permissions:
   contents: read
