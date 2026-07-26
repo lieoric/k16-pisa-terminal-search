@@ -1,0 +1,13 @@
+{
+  "id": "chamine/k16-pisa-v15-progressive-gpu-islands",
+  "title": "K16 Pisa v15 Progressive GPU Islands",
+  "code_file": "k16_pisa_v15_progressive_gpu_islands.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

@@ -15,10 +15,25 @@ on:
         description: Per-generation seconds; final value repeats forever
         required: true
         default: "180,1800,7200"
+  pull_request:
+    branches:
+      - campaign/c16-circulant-completion
+    paths:
+      - ".github/workflows/v15-progressive-deepening.yml"
+      - "campaigns/v14-kaggle-338156810-residuals.json"
+      - "requirements-sat.txt"
+      - "scripts/pisa_sat_v11.py"
+      - "scripts/rebalance_progressive_checkpoints_v15.py"
+      - "scripts/resumable_refinement_v14.py"
 
 permissions:
   actions: read
   contents: read
+
+env:
+  SOURCE_RUN_ID: ${{ inputs.source_run_id || '30221642780' }}
+  SOURCE_ARTIFACT_PATTERN: ${{ inputs.source_artifact_pattern || 'v14-stage1-shard-*' }}
+  SLICE_SCHEDULE: ${{ inputs.slice_schedule || '180,1800,7200' }}
 
 jobs:
   smoke:
@@ -35,17 +50,15 @@ jobs:
         with:
           name: v14-prepared-cutoff64
           path: prepared
-          run-id: ${{ inputs.source_run_id }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@v4
         with:
-          pattern: ${{ inputs.source_artifact_pattern }}
+          pattern: ${{ env.SOURCE_ARTIFACT_PATTERN }}
           path: source
-          run-id: ${{ inputs.source_run_id }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Validate progressive budgets and all eight source checkpoints
-        env:
-          SLICE_SCHEDULE: ${{ inputs.slice_schedule }}
         run: |
           python -m py_compile scripts/resumable_refinement_v14.py
           python - <<'PY'
@@ -129,7 +142,7 @@ jobs:
         with:
           name: v14-prepared-cutoff64
           path: prepared
-          run-id: ${{ inputs.source_run_id }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@v4
         with:
@@ -148,7 +161,7 @@ jobs:
             --shard-count 16 \
             --shard-index "${{ matrix.shard }}" \
             --pre-split-depth 3 \
-            --slice-schedule "${{ inputs.slice_schedule }}" \
+            --slice-schedule "$SLICE_SCHEDULE" \
             --queue-policy balanced \
             --wall-seconds 18500 \
             --workers 4
@@ -180,7 +193,7 @@ jobs:
         with:
           name: v14-prepared-cutoff64
           path: prepared
-          run-id: ${{ inputs.source_run_id }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@v4
         with:
@@ -199,7 +212,7 @@ jobs:
             --shard-count 16 \
             --shard-index "${{ matrix.shard }}" \
             --pre-split-depth 3 \
-            --slice-schedule "${{ inputs.slice_schedule }}" \
+            --slice-schedule "$SLICE_SCHEDULE" \
             --queue-policy balanced \
             --wall-seconds 10000 \
             --workers 4

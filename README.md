@@ -429,3 +429,19 @@ workflow run ID and resumes all eight GitHub shards for another 5h08m plus
 2h46m. `kaggle-v15/` attaches the latest v14 notebook output, resumes
 `kaggle-v14-checkpoint.json`, and applies the same `180,1800,7200` schedule
 to the disjoint Kaggle half.
+
+The partial v14 migration snapshot is recorded in
+`evidence/v14-partial-migration-20260727.json`. Across both disjoint platforms,
+288 presplit leaves and 36 complete residual roots were closed, while the
+remaining exact cover contains 2,932 descendant leaves. The latter is a cover
+count, not an equal-volume estimate of the Boolean search space.
+
+### v15 GPU witness companion
+
+`kaggle-v15-gpu/` is deliberately not part of the UNSAT accounting. It runs
+the existing CUDA endpoint-aware triangle-reversal hunter as a progressive
+island tournament: all still-relevant endpoints receive a triage budget, only
+the best 40% advance, then only the best 30% receive the longest budget.
+Every round changes the random seed and checkpoints each endpoint separately.
+Targets below the exact campaign's `sum(b) >= 16` frontier are skipped. A miss
+is only a heuristic miss; a hit is an independently verified K16 witness.
