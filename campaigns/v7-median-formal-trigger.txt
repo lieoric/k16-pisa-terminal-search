@@ -1,2 +1,2 @@
-K16 Pisa v7 local-median-order formal campaign
-Triggered after smoke run 30206927581 passed all gates and six build/search jobs.
+K16 Pisa v7.1 unknown-only resumable cube campaign
+Triggered after smoke run 30208533245 passed both gates and all twelve cube jobs.
