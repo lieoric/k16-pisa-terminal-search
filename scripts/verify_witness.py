@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -94,6 +95,42 @@ def verify_masks(out: list[int]) -> dict:
     }
 
 
+def verify_partition(payload: dict, check: dict) -> dict:
+    if payload.get("partition_scheme") != "zero-out-neighbour-colex-rank-mod-32":
+        return {"applicable": False, "valid": True}
+    masks = [int(value) for value in payload["out_masks"]]
+    positions = [
+        position for position in range(13) if (masks[0] >> (position + 2)) & 1
+    ]
+    rank = sum(
+        math.comb(position, index + 1)
+        for index, position in enumerate(positions)
+    )
+    actual_bucket = rank % 32
+    expected_bucket = int(payload["partition_bucket"])
+    target_degree = int(payload["target_degree"])
+    target_blockers = int(payload["target_blockers"])
+    valid = (
+        actual_bucket == expected_bucket
+        and check["outdegrees"][0] == target_degree
+        and payload.get("partition_bucket_count") == 32
+    )
+    branch_valid = (
+        check["outdegrees"][0] == target_degree
+        and check["blockers"][0] == target_blockers
+    )
+    return {
+        "applicable": True,
+        "valid": valid,
+        "branch_valid": branch_valid,
+        "actual_bucket": actual_bucket,
+        "expected_bucket": expected_bucket,
+        "zero_out_rank": rank,
+        "target_degree": target_degree,
+        "target_blockers": target_blockers,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("result", type=Path)
@@ -102,10 +139,18 @@ def main() -> int:
 
     payload = json.loads(args.result.read_text(encoding="utf-8"))
     check = verify_masks([int(value) for value in payload["out_masks"]])
+    partition = verify_partition(payload, check)
+    check["partition"] = partition
     check["declared_status"] = payload.get("status")
     check["source"] = str(args.result)
 
-    if payload.get("status") == "WITNESS" and not check["is_pisa"]:
+    if not partition["valid"]:
+        print(json.dumps(check, indent=2), file=sys.stderr)
+        raise SystemExit("result escaped its declared structural partition")
+
+    if payload.get("status") == "WITNESS" and (
+        not check["is_pisa"] or not partition.get("branch_valid", True)
+    ):
         print(json.dumps(check, indent=2), file=sys.stderr)
         raise SystemExit("declared witness failed independent verification")
 
@@ -117,7 +162,8 @@ def main() -> int:
     print(
         f"VERIFIED status={payload.get('status')} "
         f"is_pisa={check.get('is_pisa')} "
-        f"max_margin={max(check.get('margins', [-999]))}"
+        f"max_margin={max(check.get('margins', [-999]))} "
+        f"partition_valid={partition['valid']}"
     )
     return 0
 

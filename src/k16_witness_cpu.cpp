@@ -19,8 +19,9 @@
 namespace {
 
 constexpr int N = 16;
+constexpr int PARTITION_BUCKETS = 32;
 constexpr uint16_t FULL = 0xffffu;
-constexpr uint64_t BASE_SEED = 0x4b31365049534135ULL;  // "K16PISA5"
+constexpr uint64_t BASE_SEED = 0x4b31365049534136ULL;  // "K16PISA6"
 
 struct State {
     std::array<uint16_t, N> out{};
@@ -51,7 +52,7 @@ struct Config {
     int threads = 4;
     int target_degree = 7;
     int target_blockers = 1;
-    bool triangle_mode = false;
+    int bucket = 0;
     std::string output = "results/witness.json";
 };
 
@@ -109,7 +110,7 @@ bool is_ring_edge(int u, int v) {
 
 std::vector<std::pair<int, int>> build_free_edges() {
     std::vector<std::pair<int, int>> edges;
-    for (int u = 0; u < N; ++u) {
+    for (int u = 1; u < N; ++u) {
         for (int v = u + 1; v < N; ++v) {
             if (!is_ring_edge(u, v)) edges.emplace_back(u, v);
         }
@@ -119,7 +120,7 @@ std::vector<std::pair<int, int>> build_free_edges() {
 
 std::vector<std::array<int, 3>> build_free_triples() {
     std::vector<std::array<int, 3>> triples;
-    for (int a = 0; a < N; ++a) {
+    for (int a = 1; a < N; ++a) {
         for (int b = a + 1; b < N; ++b) {
             for (int c = b + 1; c < N; ++c) {
                 if (!is_ring_edge(a, b) && !is_ring_edge(a, c) && !is_ring_edge(b, c)) {
@@ -129,6 +130,56 @@ std::vector<std::array<int, 3>> build_free_triples() {
         }
     }
     return triples;
+}
+
+int binomial(int n, int k) {
+    if (k < 0 || k > n) return 0;
+    if (k == 0 || k == n) return 1;
+    k = std::min(k, n - k);
+    int value = 1;
+    for (int i = 1; i <= k; ++i) {
+        value = value * (n - k + i) / i;
+    }
+    return value;
+}
+
+int colex_rank(uint16_t subset) {
+    int rank = 0;
+    int selected = 0;
+    for (int position = 0; position < 13; ++position) {
+        if ((subset >> position) & 1u) {
+            ++selected;
+            rank += binomial(position, selected);
+        }
+    }
+    return rank;
+}
+
+uint16_t zero_subset(const State& s) {
+    uint16_t subset = 0;
+    for (int position = 0; position < 13; ++position) {
+        if (arc(s, 0, position + 2)) {
+            subset |= static_cast<uint16_t>(1u << position);
+        }
+    }
+    return subset;
+}
+
+std::vector<uint16_t> build_zero_patterns(int target_degree, int bucket) {
+    const int choose = target_degree - 1;
+    std::vector<uint16_t> patterns;
+    for (uint16_t subset = 0; subset < (1u << 13); ++subset) {
+        if (bit_count(subset) != choose) continue;
+        if (colex_rank(subset) % PARTITION_BUCKETS == bucket) {
+            patterns.push_back(subset);
+        }
+    }
+    return patterns;
+}
+
+bool in_partition(const State& s, const Config& cfg) {
+    return bit_count(s.out[0]) == cfg.target_degree &&
+           colex_rank(zero_subset(s)) % PARTITION_BUCKETS == cfg.bucket;
 }
 
 uint16_t reach_mask(const State& s, bool reverse) {
@@ -213,11 +264,14 @@ Evaluation evaluate(const State& s, int target_degree, int target_blockers) {
     return e;
 }
 
-bool is_witness(const Evaluation& e) {
-    return e.strong && e.branch_gap == 0 && e.max_margin == 0;
+bool is_witness(const State& s, const Evaluation& e, const Config& cfg) {
+    return e.strong && e.branch_gap == 0 && e.max_margin == 0 &&
+           in_partition(s, cfg);
 }
 
-State random_state(std::mt19937_64& rng) {
+State random_state(
+    std::mt19937_64& rng,
+    const std::vector<uint16_t>& zero_patterns) {
     State s;
     for (int u = 0; u < N; ++u) {
         for (int v = u + 1; v < N; ++v) {
@@ -228,6 +282,10 @@ State random_state(std::mt19937_64& rng) {
     // to 0->1->...->15->0.
     for (int v = 0; v < N - 1; ++v) set_arc(s, v, v + 1, true);
     set_arc(s, N - 1, 0, true);
+    const uint16_t zero_pattern = zero_patterns[rng() % zero_patterns.size()];
+    for (int position = 0; position < 13; ++position) {
+        set_arc(s, 0, position + 2, (zero_pattern >> position) & 1u);
+    }
     return s;
 }
 
@@ -238,32 +296,11 @@ void apply_move(State& s, const Move& move) {
 }
 
 Move random_edge_move(
-    const State& s,
-    const Evaluation& e,
-    int target_degree,
+    const State&,
+    const Evaluation&,
+    int,
     const std::vector<std::pair<int, int>>& free_edges,
     std::mt19937_64& rng) {
-    // When vertex 0 has the wrong score, most proposals directly repair it.
-    if (e.degree[0] != target_degree && (rng() % 100) < 70) {
-        std::array<std::pair<int, int>, N> candidates{};
-        int count = 0;
-        for (const auto& edge : free_edges) {
-            if (edge.first != 0 && edge.second != 0) continue;
-            const int x = edge.first == 0 ? edge.second : edge.first;
-            const bool zero_beats_x = arc(s, 0, x);
-            if ((e.degree[0] > target_degree && zero_beats_x) ||
-                (e.degree[0] < target_degree && !zero_beats_x)) {
-                candidates[count++] = {0, x};
-            }
-        }
-        if (count > 0) {
-            Move move;
-            move.edges[0] = candidates[rng() % count];
-            move.count = 1;
-            return move;
-        }
-    }
-
     Move move;
     move.edges[0] = free_edges[rng() % free_edges.size()];
     move.count = 1;
@@ -304,20 +341,27 @@ bool better(const Evaluation& a, const Evaluation& b) {
            std::tie(b.loss, b.branch_gap, b.positive_count, b.positive_sum);
 }
 
-void publish_best(SharedBest& shared, const State& s, const Evaluation& e, int thread_id) {
+void publish_best(
+    SharedBest& shared,
+    const State& s,
+    const Evaluation& e,
+    const Config& cfg,
+    int thread_id) {
     std::lock_guard<std::mutex> lock(shared.mutex);
     if (!shared.initialized || better(e, shared.eval)) {
         shared.state = s;
         shared.eval = e;
         shared.initialized = true;
-        shared.witness = is_witness(e);
+        shared.witness = is_witness(s, e, cfg);
         std::cerr << "best thread=" << thread_id
                   << " loss=" << e.loss
                   << " branch_gap=" << e.branch_gap
                   << " positive=" << e.positive_count
                   << " max_margin=" << e.max_margin
                   << " d0=" << e.degree[0]
-                  << " b0=" << e.blockers[0] << "\n";
+                  << " b0=" << e.blockers[0]
+                  << " bucket=" << cfg.bucket
+                  << " zero_rank=" << colex_rank(zero_subset(s)) << "\n";
         if (shared.witness) stop_requested.store(true, std::memory_order_relaxed);
     }
 }
@@ -328,12 +372,14 @@ void worker(
     const std::chrono::steady_clock::time_point deadline,
     SharedBest& shared,
     const std::vector<std::pair<int, int>>& free_edges,
-    const std::vector<std::array<int, 3>>& triples) {
+    const std::vector<std::array<int, 3>>& triples,
+    const std::vector<uint16_t>& zero_patterns) {
+    const bool triangle_mode = (thread_id % 2) == 1;
     const uint64_t seed = splitmix64(
         BASE_SEED ^
         (static_cast<uint64_t>(cfg.shard) << 32) ^
         (static_cast<uint64_t>(thread_id) << 1) ^
-        (cfg.triangle_mode ? 0x545249414e474c45ULL : 0x454447454d4f4445ULL));
+        (triangle_mode ? 0x545249414e474c45ULL : 0x454447454d4f4445ULL));
     std::mt19937_64 rng(seed);
 
     constexpr int SAMPLE_MOVES = 6;
@@ -342,7 +388,7 @@ void worker(
 
     while (!stop_requested.load(std::memory_order_relaxed) &&
            std::chrono::steady_clock::now() < deadline) {
-        State current = random_state(rng);
+        State current = random_state(rng, zero_patterns);
 
         // Occasionally restart near the current global elite, with a kick.
         if ((rng() % 100) < 55) {
@@ -360,7 +406,7 @@ void worker(
         Evaluation current_eval =
             evaluate(current, cfg.target_degree, cfg.target_blockers);
         evaluated.fetch_add(1, std::memory_order_relaxed);
-        publish_best(shared, current, current_eval, thread_id);
+        publish_best(shared, current, current_eval, cfg, thread_id);
         int stagnation = 0;
 
         for (int step = 0;
@@ -374,7 +420,7 @@ void worker(
             bool chosen_set = false;
 
             for (int sample = 0; sample < SAMPLE_MOVES; ++sample) {
-                Move move = cfg.triangle_mode
+                Move move = triangle_mode
                     ? random_triangle_or_edge_move(
                           current, current_eval, cfg.target_degree,
                           free_edges, triples, rng)
@@ -407,7 +453,7 @@ void worker(
                 const bool improved = better(chosen_eval, current_eval);
                 current_eval = chosen_eval;
                 stagnation = improved ? 0 : stagnation + 1;
-                publish_best(shared, current, current_eval, thread_id);
+                publish_best(shared, current, current_eval, cfg, thread_id);
             } else {
                 ++stagnation;
             }
@@ -473,7 +519,26 @@ bool self_test() {
         six += d == 6;
         seven += d == 7;
     }
-    return six == 7 && seven == 7;
+    if (six != 7 || seven != 7) return false;
+
+    for (const int degree : {7, 6}) {
+        const int expected = binomial(13, degree - 1);
+        int total = 0;
+        std::vector<bool> seen(1u << 13, false);
+        for (int bucket = 0; bucket < PARTITION_BUCKETS; ++bucket) {
+            const auto patterns = build_zero_patterns(degree, bucket);
+            if (patterns.empty()) return false;
+            total += static_cast<int>(patterns.size());
+            for (const uint16_t subset : patterns) {
+                if (seen[subset]) return false;
+                if (bit_count(subset) != degree - 1) return false;
+                if (colex_rank(subset) % PARTITION_BUCKETS != bucket) return false;
+                seen[subset] = true;
+            }
+        }
+        if (total != expected) return false;
+    }
+    return true;
 }
 
 std::string json_array(const std::array<int, N>& values) {
@@ -495,15 +560,32 @@ void write_json(
     std::ofstream out(cfg.output);
     if (!out) throw std::runtime_error("cannot open output path");
 
-    const bool witness = shared.initialized && is_witness(shared.eval);
+    const bool witness =
+        shared.initialized && is_witness(shared.state, shared.eval, cfg);
+    const uint16_t subset = zero_subset(shared.state);
+    const int rank = colex_rank(subset);
+    const auto bucket_patterns =
+        build_zero_patterns(cfg.target_degree, cfg.bucket);
     out << "{\n";
-    out << "  \"campaign\": \"K16-PISA-v5\",\n";
+    out << "  \"campaign\": \"K16-PISA-v6-true-partitions\",\n";
     out << "  \"platform\": \"github-cpu\",\n";
     out << "  \"status\": \"" << (witness ? "WITNESS" : "NO_WITNESS") << "\",\n";
     out << "  \"shard\": " << cfg.shard << ",\n";
     out << "  \"strategy\": \""
         << (cfg.target_degree == 7 ? "d7_b1" : "d6_b3")
-        << (cfg.triangle_mode ? "_mixed" : "_edge") << "\",\n";
+        << "_bucket_" << std::setw(2) << std::setfill('0') << cfg.bucket
+        << "_hybrid_threads";
+    out << "\",\n";
+    out << std::setfill(' ');
+    out << "  \"partition_scheme\": "
+        << "\"zero-out-neighbour-colex-rank-mod-32\",\n";
+    out << "  \"partition_bucket\": " << cfg.bucket << ",\n";
+    out << "  \"partition_bucket_count\": " << PARTITION_BUCKETS << ",\n";
+    out << "  \"partition_pattern_count\": " << bucket_patterns.size() << ",\n";
+    out << "  \"zero_out_subset\": " << subset << ",\n";
+    out << "  \"zero_out_rank\": " << rank << ",\n";
+    out << "  \"partition_valid\": "
+        << (in_partition(shared.state, cfg) ? "true" : "false") << ",\n";
     out << "  \"target_degree\": " << cfg.target_degree << ",\n";
     out << "  \"target_blockers\": " << cfg.target_blockers << ",\n";
     out << "  \"threads\": " << cfg.threads << ",\n";
@@ -546,10 +628,12 @@ Config parse_args(int argc, char** argv, bool& run_self_test) {
         else throw std::runtime_error("unknown argument: " + arg);
     }
 
-    const int lane = ((cfg.shard % 4) + 4) % 4;
-    cfg.target_degree = lane < 2 ? 7 : 6;
+    if (cfg.shard < 0 || cfg.shard >= 64) {
+        throw std::runtime_error("shard must be in [0,63]");
+    }
+    cfg.target_degree = cfg.shard < 32 ? 7 : 6;
     cfg.target_blockers = cfg.target_degree == 7 ? 1 : 3;
-    cfg.triangle_mode = (lane % 2) == 1;
+    cfg.bucket = cfg.shard % PARTITION_BUCKETS;
     cfg.threads = std::max(1, cfg.threads);
     cfg.seconds = std::max(1, cfg.seconds);
     return cfg;
@@ -571,8 +655,14 @@ int main(int argc, char** argv) {
         const auto deadline = start + std::chrono::seconds(cfg.seconds);
         const auto free_edges = build_free_edges();
         const auto triples = build_free_triples();
-        if (free_edges.size() != 104) {
-            throw std::runtime_error("expected 104 free edges after fixing the cycle");
+        const auto zero_patterns =
+            build_zero_patterns(cfg.target_degree, cfg.bucket);
+        if (free_edges.size() != 91) {
+            throw std::runtime_error(
+                "expected 91 mutable nonzero edges after fixing cycle and partition");
+        }
+        if (zero_patterns.empty()) {
+            throw std::runtime_error("partition bucket has no zero-neighbour patterns");
         }
 
         SharedBest shared;
@@ -580,7 +670,8 @@ int main(int argc, char** argv) {
         for (int t = 0; t < cfg.threads; ++t) {
             workers.emplace_back(
                 worker, t, std::cref(cfg), deadline, std::ref(shared),
-                std::cref(free_edges), std::cref(triples));
+                std::cref(free_edges), std::cref(triples),
+                std::cref(zero_patterns));
         }
         for (auto& thread : workers) thread.join();
 
@@ -591,6 +682,8 @@ int main(int argc, char** argv) {
         std::cout << "status="
                   << (shared.witness ? "WITNESS" : "NO_WITNESS")
                   << " shard=" << cfg.shard
+                  << " branch=" << (cfg.target_degree == 7 ? "d7_b1" : "d6_b3")
+                  << " bucket=" << cfg.bucket
                   << " loss=" << shared.eval.loss
                   << " states=" << evaluated.load()
                   << " seconds=" << std::fixed << std::setprecision(2)

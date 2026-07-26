@@ -20,7 +20,7 @@ def main() -> int:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if data.get("campaign") != "K16-PISA-v5":
+        if data.get("campaign") != "K16-PISA-v6-true-partitions":
             continue
         data["_artifact_path"] = str(path)
         records.append(data)
@@ -28,7 +28,7 @@ def main() -> int:
     witnesses = [record for record in records if record.get("status") == "WITNESS"]
     best = min(records, key=lambda record: record.get("best_loss", 10**18), default=None)
     summary = {
-        "campaign": "K16-PISA-v5",
+        "campaign": "K16-PISA-v6-true-partitions",
         "shards_collected": len(records),
         "witnesses": len(witnesses),
         "status": "WITNESS" if witnesses else "NO_WITNESS_IN_COMPLETED_SHARDS",

@@ -1,31 +1,31 @@
-name: K16 Pisa witness hunter CPU 64-shard matrix
+name: K16 Pisa v6 CPU 64 true partitions
 
 on:
   workflow_dispatch:
     inputs:
       seconds_per_shard:
-        description: Search seconds for each independent shard
+        description: Search seconds for each disjoint structural partition
         required: true
-        default: "3600"
+        default: "1200"
       threads_per_shard:
         description: CPU threads used by each shard
         required: true
         default: "4"
   push:
     branches:
-      - "campaign/k16-witness-v5"
+      - "campaign/k16-witness-v6"
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: k16-witness-cpu-${{ github.ref }}
+  group: k16-witness-v6-cpu-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   shards:
-    name: Witness shard ${{ matrix.shard }}
+    name: Structural partition ${{ matrix.shard }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
     strategy:
@@ -108,7 +108,7 @@ jobs:
           mkdir -p "results/shard-${{ matrix.shard }}"
           ./k16_witness_cpu \
             --shard "${{ matrix.shard }}" \
-            --seconds "${{ inputs.seconds_per_shard || '3600' }}" \
+            --seconds "${{ inputs.seconds_per_shard || '1200' }}" \
             --threads "${{ inputs.threads_per_shard || '4' }}" \
             --output "results/shard-${{ matrix.shard }}/result.json" \
             2>&1 | tee "results/shard-${{ matrix.shard }}/run.log"
@@ -124,8 +124,12 @@ jobs:
           import json
           from pathlib import Path
           r = json.loads(Path("results/shard-${{ matrix.shard }}/result.json").read_text())
-          print(f"## Shard {r['shard']}: {r['status']}")
+          print(f"## Structural partition {r['shard']}: {r['status']}")
           print(f"- Strategy: `{r['strategy']}`")
+          print(f"- Branch: `d{r['target_degree']}_b{r['target_blockers']}`")
+          print(f"- Bucket: `{r['partition_bucket']}/31`")
+          print(f"- Zero-neighbour patterns in this bucket: {r['partition_pattern_count']}")
+          print(f"- Partition invariant: **{r['partition_valid']}**")
           print(f"- States evaluated: {r['states_evaluated']:,}")
           print(f"- Best loss: {r['best_loss']}")
           print(f"- Best positive-margin vertices: {r['best_positive_count']}")

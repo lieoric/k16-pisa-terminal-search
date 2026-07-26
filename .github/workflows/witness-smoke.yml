@@ -1,4 +1,4 @@
-name: K16 Pisa witness hunter smoke
+name: K16 Pisa v6 true-partition smoke
 
 on:
   workflow_dispatch:
@@ -33,7 +33,7 @@ jobs:
         run: python -m py_compile scripts/verify_witness.py scripts/aggregate_witness_results.py
 
   shards:
-    name: Smoke shard ${{ matrix.shard }}
+    name: Smoke partition ${{ matrix.shard }}
     needs: gate
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -41,7 +41,7 @@ jobs:
       fail-fast: false
       max-parallel: 8
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 16, 31, 32, 33, 48, 63]
     steps:
       - uses: actions/checkout@v6
       - name: Build native hunter
@@ -69,8 +69,12 @@ jobs:
           import json
           from pathlib import Path
           r = json.loads(Path("results/shard-${{ matrix.shard }}/result.json").read_text())
-          print(f"## Shard {r['shard']}")
+          print(f"## Structural partition {r['shard']}")
           print(f"- Strategy: `{r['strategy']}`")
+          print(f"- Branch: `d{r['target_degree']}_b{r['target_blockers']}`")
+          print(f"- Bucket: `{r['partition_bucket']}/31`")
+          print(f"- Zero-neighbour patterns: {r['partition_pattern_count']}")
+          print(f"- Partition invariant: **{r['partition_valid']}**")
           print(f"- Status: **{r['status']}**")
           print(f"- States: {r['states_evaluated']:,}")
           print(f"- Best loss: {r['best_loss']}")

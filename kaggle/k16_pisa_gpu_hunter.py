@@ -8,7 +8,9 @@ witness is independently rechecked by scripts.verify_witness.verify_masks.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
+import math
 import random
 import sys
 import time
@@ -20,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.verify_witness import verify_masks
 
 N = 16
-BASE_SEED = 0x4B31365049534135
+PARTITION_BUCKETS = 32
+BASE_SEED = 0x4B31365049534136
 
 
 def edge_data() -> tuple[list[tuple[int, int]], list[tuple[int, int]], list[int]]:
@@ -46,21 +49,69 @@ FREE_TRIANGLES = [
 ]
 
 
+def colex_rank_from_positions(positions: tuple[int, ...] | list[int]) -> int:
+    return sum(math.comb(position, index + 1) for index, position in enumerate(positions))
+
+
+def zero_patterns(target_degree: int, bucket: int) -> list[list[bool]]:
+    patterns: list[list[bool]] = []
+    for positions in itertools.combinations(range(13), target_degree - 1):
+        if colex_rank_from_positions(positions) % PARTITION_BUCKETS != bucket:
+            continue
+        row = [False] * 13
+        for position in positions:
+            row[position] = True
+        patterns.append(row)
+    if not patterns:
+        raise RuntimeError(f"empty partition bucket: d={target_degree}, bucket={bucket}")
+    return patterns
+
+
+def zero_partition_from_masks(masks: list[int]) -> tuple[int, int, int]:
+    positions = [
+        position for position in range(13) if (masks[0] >> (position + 2)) & 1
+    ]
+    rank = colex_rank_from_positions(positions)
+    subset = sum(1 << position for position in positions)
+    return subset, rank, rank % PARTITION_BUCKETS
+
+
+def partition_self_test() -> None:
+    for degree in (7, 6):
+        seen: set[tuple[bool, ...]] = set()
+        expected = math.comb(13, degree - 1)
+        for bucket in range(PARTITION_BUCKETS):
+            patterns = zero_patterns(degree, bucket)
+            for pattern in patterns:
+                key = tuple(pattern)
+                if key in seen:
+                    raise AssertionError("partition overlap")
+                positions = tuple(i for i, value in enumerate(pattern) if value)
+                assert len(positions) == degree - 1
+                assert colex_rank_from_positions(positions) % PARTITION_BUCKETS == bucket
+                seen.add(key)
+        assert len(seen) == expected
+
+
 def initial_population(
-    batch: int, target_degree: int, device: torch.device, generator: torch.Generator
+    batch: int,
+    target_degree: int,
+    bucket: int,
+    device: torch.device,
+    generator: torch.Generator,
 ) -> torch.Tensor:
     bits = torch.randint(
         0, 2, (batch, len(FREE_EDGES)), device=device, dtype=torch.bool, generator=generator
     )
-    # The fixed cycle contributes 0->1 and 15->0.  Choose the remaining
-    # out-neighbours of vertex 0 exactly, so every walker stays in its branch.
-    scores = torch.rand(
-        (batch, len(ZERO_FREE_INDICES)), device=device, generator=generator
+    # The fixed cycle contributes 0->1 and 15->0.  The remaining 13
+    # zero-neighbour choices are partitioned by colex rank modulo 32.  Mutations
+    # never touch these edges, so walkers cannot cross logical shards.
+    pattern_values = zero_patterns(target_degree, bucket)
+    pattern_tensor = torch.tensor(pattern_values, dtype=torch.bool, device=device)
+    chosen = torch.randint(
+        0, len(pattern_values), (batch,), device=device, generator=generator
     )
-    chosen = scores.topk(target_degree - 1, dim=1).indices
-    zero_values = torch.zeros_like(scores, dtype=torch.bool)
-    zero_values.scatter_(1, chosen, True)
-    bits[:, ZERO_FREE_INDICES] = zero_values
+    bits[:, ZERO_FREE_INDICES] = pattern_tensor[chosen]
     return bits
 
 
@@ -181,15 +232,37 @@ def save_record(
     candidates: int,
     best_bits: torch.Tensor,
     best_loss: int,
+    target_degree: int,
+    target_blockers: int,
+    bucket: int,
 ) -> dict:
     masks = bits_to_masks(best_bits)
     check = verify_masks(masks)
+    subset, rank, actual_bucket = zero_partition_from_masks(masks)
+    partition_valid = (
+        actual_bucket == bucket
+        and check["outdegrees"][0] == target_degree
+    )
+    valid_witness = (
+        check["is_pisa"]
+        and partition_valid
+        and check["blockers"][0] == target_blockers
+    )
     record = {
-        "campaign": "K16-PISA-v5",
+        "campaign": "K16-PISA-v6-true-partitions",
         "platform": "kaggle-gpu",
-        "status": "WITNESS" if check["is_pisa"] else "NO_WITNESS",
+        "status": "WITNESS" if valid_witness else "NO_WITNESS",
         "shard": shard,
         "strategy": strategy,
+        "partition_scheme": "zero-out-neighbour-colex-rank-mod-32",
+        "partition_bucket": bucket,
+        "partition_bucket_count": PARTITION_BUCKETS,
+        "partition_pattern_count": len(zero_patterns(target_degree, bucket)),
+        "zero_out_subset": subset,
+        "zero_out_rank": rank,
+        "partition_valid": partition_valid,
+        "target_degree": target_degree,
+        "target_blockers": target_blockers,
         "wall_seconds": round(seconds, 3),
         "generations": generations,
         "states_evaluated": candidates,
@@ -213,18 +286,23 @@ def run_shard(
     device: torch.device,
     output: Path,
 ) -> dict:
-    lane = shard % 4
-    target_degree = 7 if lane < 2 else 6
+    if shard < 0 or shard >= 64:
+        raise ValueError("shard must be in [0, 63]")
+    target_degree = 7 if shard < 32 else 6
     target_blockers = 1 if target_degree == 7 else 3
-    mixed = lane % 2 == 1
-    strategy = f"d{target_degree}_b{target_blockers}_{'mixed' if mixed else 'edge'}"
+    bucket = shard % PARTITION_BUCKETS
+    strategy = (
+        f"d{target_degree}_b{target_blockers}_bucket_{bucket:02d}_hybrid_population"
+    )
     seed = (BASE_SEED ^ (shard << 32) ^ 0x475055) & ((1 << 63) - 1)
     torch.manual_seed(seed)
     random.seed(seed)
     generator = torch.Generator(device=device)
     generator.manual_seed(seed)
 
-    population = initial_population(batch, target_degree, device, generator)
+    population = initial_population(
+        batch, target_degree, bucket, device, generator
+    )
     metrics = evaluate(population, target_degree, target_blockers)
     # evaluate() runs under inference_mode for speed. Clone the persistent
     # population scores into ordinary storage before steady-state updates.
@@ -237,7 +315,7 @@ def run_shard(
     candidates = batch
 
     while time.monotonic() - start < seconds and best_loss != 0:
-        children = mutate_edges(population, generator, mixed)
+        children = mutate_edges(population, generator, mixed=True)
         child_metrics = evaluate(children, target_degree, target_blockers)
         child_losses = child_metrics["loss"]
         candidates += batch
@@ -271,14 +349,26 @@ def run_shard(
                     0, elite_count, (worst_count,), device=device, generator=generator
                 )
             ]
-            population[worst] = mutate_edges(population[parents], generator, mixed)
+            population[worst] = mutate_edges(
+                population[parents], generator, mixed=True
+            )
             refreshed = evaluate(population[worst], target_degree, target_blockers)
             losses[worst] = refreshed["loss"]
             candidates += worst_count
 
     elapsed = time.monotonic() - start
     return save_record(
-        output, shard, strategy, elapsed, generations, candidates, best_bits, best_loss
+        output,
+        shard,
+        strategy,
+        elapsed,
+        generations,
+        candidates,
+        best_bits,
+        best_loss,
+        target_degree,
+        target_blockers,
+        bucket,
     )
 
 
@@ -288,13 +378,28 @@ def main() -> int:
     parser.add_argument("--shard-count", type=int, default=64)
     parser.add_argument("--seconds-per-shard", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=16384)
-    parser.add_argument("--output-dir", type=Path, default=Path("/kaggle/working/k16_gpu_results"))
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("/kaggle/working/k16_gpu_results_v6"),
+    )
+    parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--allow-cpu", action="store_true")
     args = parser.parse_args()
 
+    partition_self_test()
+    print(
+        "PARTITION_GATE_PASS "
+        f"d7_patterns={math.comb(13, 6)} "
+        f"d6_patterns={math.comb(13, 5)} "
+        "buckets_per_branch=32",
+        flush=True,
+    )
+
     if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print(f"CUDA device: {torch.cuda.get_device_name(0)}")
+        device = torch.device(args.device)
+        torch.cuda.set_device(device)
+        print(f"CUDA device: {device} {torch.cuda.get_device_name(device)}")
     elif args.allow_cpu:
         device = torch.device("cpu")
         print("WARNING: CPU fallback is for smoke testing only")
@@ -323,7 +428,7 @@ def main() -> int:
         checkpoint.write_text(
             json.dumps(
                 {
-                    "campaign": "K16-PISA-v5",
+                    "campaign": "K16-PISA-v6-true-partitions",
                     "completed_shards": sorted(completed),
                     "witness_found": result["status"] == "WITNESS",
                 },
