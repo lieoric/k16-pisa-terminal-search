@@ -61,3 +61,86 @@ python k16_pisa_solver.py --help
 ```
 
 No credentials or repository secrets are required by the workflows.
+
+## Heuristic SAT witness campaign
+
+The proof-oriented CP-SAT workflows above remain unchanged. The v7 witness
+campaign searches only for one valid K16 Pisa orientation in the two unresolved
+zero-margin branches `(d,b)=(7,1)` and `(6,3)`.
+
+This campaign is deliberately one-sided:
+
+- `WITNESS` means the candidate passed an independent bit-mask verifier and is
+  an unconditional SAT certificate;
+- `NO_WITNESS` means only that one timed heuristic partition did not find a
+  witness; it is a successful job, not an UNSAT claim;
+- each generated tournament contains the fixed directed Hamiltonian cycle
+  `0->1->...->15->0`, which is a lossless relabelling for any strong witness;
+- the 13 unfixed edges incident with zero encode its remaining out-neighbours;
+  their colexicographic combination rank modulo 32 defines a structural bucket;
+- shards `0..31` are the 32 disjoint `(7,1)` buckets and shards `32..63` are
+  the 32 disjoint `(6,3)` buckets;
+- zero-incident edges are immutable during a run, so candidates cannot cross
+  buckets. The 64 logical solution spaces are mutually exclusive.
+
+### GitHub Actions CPU search
+
+`K16 Pisa v7 blocker-repair smoke` builds the native C++ searcher, proves that
+the 32 buckets cover each branch without overlap, and samples eight partitions
+from both branches. After it passes, manually dispatch
+`K16 Pisa v7 CPU 64 blocker-repair partitions`. The full workflow runs 64 jobs with
+`max-parallel: 20`:
+
+```text
+shard  0..31  d7_b1, bucket = shard
+shard 32..63  d6_b3, bucket = shard - 32
+```
+
+Each four-thread job uses dynamic violated-vertex weights, targeted degree and
+blocker-completion moves, a 32-state diversity pool, and exact radius-six local
+repair when it reaches the one-offender margin-one plateau. Every job uploads
+its JSON result, blocker-defect diagnostics, repair counts, an independent
+partition/witness verification record, and the full log. The aggregate job
+uploads a campaign summary. No secret is required.
+
+### Kaggle GPU search
+
+Import `kaggle/k16_pisa_gpu_hunter.ipynb` into Kaggle and select:
+
+```text
+Accelerator: GPU T4 x2
+Internet: ON
+```
+
+GPU 0 searches the 32 `(7,1)` partitions while GPU 1 concurrently searches the
+32 `(6,3)` partitions. The PyTorch/CUDA hunter evaluates thousands of
+tournaments in parallel, writes one JSON per partition, and updates separate
+checkpoints under `/kaggle/working/k16_gpu_results_v7`. Download that directory
+before a Kaggle session expires. The notebook currently checks out branch
+`agent/witness-hunter`; change `REF` to `main` after the pull request is merged.
+
+## C16(1,7,8) carrier-completion campaign
+
+The workflow `C16(1,7,8) carrier completion 11-box matrix` tests a separate
+structure-led construction.  The sparse carrier is the ordered-pair blow-up of
+a directed 8-cycle:
+
+- pair `i` dominates pair `i-1` modulo 8;
+- inside each pair, the high vertex dominates the low vertex;
+- its underlying graph is exactly `C16(1,7,8)`;
+- its degree profile is `2^8 3^8` and its margin profile is `0^8 (-1)^8`.
+
+Module rotation leaves the carrier orientation fixed.  Therefore a zero-margin
+vertex in any tournament completion can be moved to one of only two orbit
+representatives.  The exact matrix covers:
+
+```text
+low orbit:  d = 2,3,4,5,6,7
+high orbit: d =   3,4,5,6,7
+```
+
+These eleven boxes cover every completion of this fixed canonical carrier
+orientation. `SAT` is an independently checked, unconditional K16 Pisa
+witness. `UNSAT` closes the named completion box; all eleven `UNSAT` results
+close this carrier-completion construction but do not prove that arbitrary K16
+tournaments are impossible.

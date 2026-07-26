@@ -1,0 +1,94 @@
+name: K16 Pisa v7 blocker-repair smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "agent/**"
+    paths:
+      - "src/k16_witness_cpu.cpp"
+      - "scripts/verify_witness.py"
+      - "scripts/aggregate_witness_results.py"
+      - ".github/workflows/witness-*.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k16-witness-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Native and verifier gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build native hunter
+        run: g++ -std=c++17 -O3 -DNDEBUG -pthread src/k16_witness_cpu.cpp -o k16_witness_cpu
+      - name: Run construction gates
+        run: ./k16_witness_cpu --self-test
+      - name: Check Python verifier syntax
+        run: python -m py_compile scripts/verify_witness.py scripts/aggregate_witness_results.py
+
+  shards:
+    name: Smoke partition ${{ matrix.shard }}
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 16, 31, 32, 33, 48, 63]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build native hunter
+        run: g++ -std=c++17 -O3 -DNDEBUG -pthread src/k16_witness_cpu.cpp -o k16_witness_cpu
+      - name: Run twenty-second witness shard
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "results/shard-${{ matrix.shard }}"
+          ./k16_witness_cpu \
+            --shard "${{ matrix.shard }}" \
+            --seconds 20 \
+            --threads 4 \
+            --output "results/shard-${{ matrix.shard }}/result.json" \
+            2>&1 | tee "results/shard-${{ matrix.shard }}/run.log"
+      - name: Independently verify result
+        run: |
+          python scripts/verify_witness.py \
+            "results/shard-${{ matrix.shard }}/result.json" \
+            --write-check "results/shard-${{ matrix.shard }}/verification.json"
+      - name: Show logical status
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          r = json.loads(Path("results/shard-${{ matrix.shard }}/result.json").read_text())
+          print(f"## Structural partition {r['shard']}")
+          print(f"- Strategy: `{r['strategy']}`")
+          print(f"- Branch: `d{r['target_degree']}_b{r['target_blockers']}`")
+          print(f"- Bucket: `{r['partition_bucket']}/31`")
+          print(f"- Zero-neighbour patterns: {r['partition_pattern_count']}")
+          print(f"- Partition invariant: **{r['partition_valid']}**")
+          print(f"- Status: **{r['status']}**")
+          print(f"- States: {r['states_evaluated']:,}")
+          print(f"- Best loss: {r['best_loss']}")
+          print(f"- Best blocker defect: {r['best_positive_defect_sum']}")
+          print(f"- Diverse elites retained: {r['elite_pool_size']}")
+          print(f"- Exact repairs: {r['repair_attempts']} ({r['repair_states']:,} states)")
+          print()
+          print("`NO_WITNESS` is a successful heuristic run, not an UNSAT claim.")
+          PY
+      - name: Upload shard evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: witness-smoke-shard-${{ matrix.shard }}
+          path: results/shard-${{ matrix.shard }}/
+          if-no-files-found: error
+          retention-days: 30

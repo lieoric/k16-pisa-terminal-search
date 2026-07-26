@@ -1,0 +1,85 @@
+name: C16(1,7,8) carrier completion 11-box matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds_per_box:
+        description: Exact CP-SAT seconds for each completion box
+        required: true
+        default: "1800"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: c16-1-7-8-completion-formal
+  cancel-in-progress: false
+
+jobs:
+  boxes:
+    name: Completion ${{ matrix.box }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 11
+      matrix:
+        box:
+          - low_d2_b11
+          - low_d3_b9
+          - low_d4_b7
+          - low_d5_b5
+          - low_d6_b3
+          - low_d7_b1
+          - high_d3_b9
+          - high_d4_b7
+          - high_d5_b5
+          - high_d6_b3
+          - high_d7_b1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run exact carrier-completion box
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "results/${{ matrix.box }}"
+          python scripts/circulant_completion.py \
+            --box "${{ matrix.box }}" \
+            --seconds "${{ inputs.seconds_per_box }}" \
+            --workers 4 \
+            --output "results/${{ matrix.box }}/result.json" \
+            2>&1 | tee "results/${{ matrix.box }}/run.log"
+      - name: Record logical result
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          path = Path("results/${{ matrix.box }}/result.json")
+          record = json.loads(path.read_text())
+          print(f"## {record['box']}: {record['status']}")
+          print(f"- Zero orbit: `{record['orbit']}`")
+          print(f"- Zero type: `(d,b)=({record['degree']},{record['blockers']})`")
+          print(f"- Solver status: `{record['solver_status']}`")
+          print(f"- Seconds: {record['seconds']}")
+          if record["status"] == "SAT":
+              print("- **Independent verifier accepted a K16 Pisa witness.**")
+          elif record["status"] == "UNSAT":
+              print("- This exact fixed-carrier completion box is closed.")
+          else:
+              print("- No conclusion; timeout/unknown does not close the box.")
+          PY
+      - name: Upload JSON and log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: circulant-completion-${{ matrix.box }}
+          path: results/${{ matrix.box }}/
+          if-no-files-found: error
+          retention-days: 90
