@@ -4,11 +4,13 @@
 This is deliberately a benchmark, not a formal K16 campaign.  It:
 
 1. installs the exact Python dependencies;
-2. builds SAT Modulo Symmetries (SMS) and RoundingSat at pinned commits;
+2. builds SAT Modulo Symmetries (SMS) at a pinned commit;
 3. runs K8/K14/K15 correctness gates;
 4. asks SMS for complete canonical K16 partitions at several edge depths;
 5. times a stratified sample of residual cubes with ordinary CaDiCaL.
 
+RoundingSat is an optional comparison route.  Native compiler differences on
+hosted notebooks must never prevent the SMS/CaDiCaL benchmark from running.
 Every SAT result is independently verified.  A timed-out cube is recorded as
 UNKNOWN and never counted as excluded.
 """
@@ -40,6 +42,11 @@ PARTITION_TIMEOUT_SECONDS = 180
 CUBE_TIMEOUT_SECONDS = 120
 CUBE_SAMPLE_SIZE = 16
 MAX_PARALLEL_CUBES = max(1, min(4, os.cpu_count() or 2))
+TRY_ROUNDINGSAT = os.environ.get("K16_TRY_ROUNDINGSAT", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 
 def run(
@@ -196,6 +203,40 @@ def ensure_roundingsat() -> Path:
     if not binary.exists():
         raise RuntimeError("RoundingSat build did not create roundingsat")
     return binary
+
+
+def optional_roundingsat() -> tuple[Path | None, dict]:
+    """Build the optional PB comparison without blocking the main benchmark."""
+    if not TRY_ROUNDINGSAT:
+        return None, {
+            "route": "roundingsat",
+            "status": "SKIPPED",
+            "reason": "Set K16_TRY_ROUNDINGSAT=1 to enable the optional PB comparison.",
+        }
+
+    build_log = RESULT_ROOT / "roundingsat-build.log"
+    try:
+        binary = ensure_roundingsat()
+        return binary, {
+            "route": "roundingsat",
+            "status": "READY",
+            "binary": str(binary),
+        }
+    except Exception as exc:
+        output = getattr(exc, "stdout", None) or ""
+        build_log.write_text(
+            output + ("\n" if output else "") + repr(exc) + "\n",
+            encoding="utf-8",
+        )
+        print("OPTIONAL ROUNDINGSAT BUILD SKIPPED:", repr(exc), flush=True)
+        if output:
+            print(output[-4000:], flush=True)
+        return None, {
+            "route": "roundingsat",
+            "status": "SKIPPED",
+            "reason": repr(exc),
+            "log": str(build_log),
+        }
 
 
 def generate_formula(n: int, *, opb: bool = False) -> tuple[Path, Path]:
@@ -464,12 +505,22 @@ def main() -> None:
     ensure_dependencies()
     ensure_system_packages()
     sms = ensure_sms()
-    roundingsat = ensure_roundingsat()
+    roundingsat, roundingsat_route = optional_roundingsat()
 
     gates = [direct_gate(n) for n in (8, 14, 15)]
     k8_cnf, k8_opb = generate_formula(8, opb=True)
     gates.append(sms_gate(sms, k8_cnf, 8))
-    gates.append(pb_gate(roundingsat, k8_opb, 8))
+    if roundingsat is not None:
+        gates.append(pb_gate(roundingsat, k8_opb, 8))
+    else:
+        gates.append(
+            {
+                "n": 8,
+                "solver": "roundingsat",
+                "status": "SKIPPED",
+                "reason": roundingsat_route["reason"],
+            }
+        )
 
     k16_cnf, _ = generate_formula(16, opb=False)
     partitions = [
@@ -488,7 +539,7 @@ def main() -> None:
         cube_results = benchmark_cubes(k16_cnf, selected)
 
     summary = {
-        "model_version": "k16-pisa-v11-kaggle-cpu-benchmark-20260727",
+        "model_version": "k16-pisa-v11.1-kaggle-cpu-benchmark-20260727",
         "status": (
             "SAT"
             if any(record.get("status") == "SAT" for record in cube_results)
@@ -498,6 +549,7 @@ def main() -> None:
         "cpu_workers": MAX_PARALLEL_CUBES,
         "sms_commit": SMS_COMMIT,
         "roundingsat_commit": ROUNDINGSAT_COMMIT,
+        "optional_routes": [roundingsat_route],
         "gates": gates,
         "partitions": partitions,
         "selected_partition": selected,
