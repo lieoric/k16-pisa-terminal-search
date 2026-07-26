@@ -364,3 +364,13 @@ and left 84 `UNKNOWN`, with no SAT witness and no errors.  Parent 6992 was
 reduced from one open cube to five open children (11 of 16 closed), while
 parent 1 lost one child.  No whole parent closed in this pilot.  The exact
 transcription is `evidence/v13-github-run-30220349089.json`.
+
+Kaggle version
+[`338156810`](https://www.kaggle.com/code/chamine/k16-pisa-v13-adaptive-unknown-cubes?scriptVersionId=338156810)
+completed the depth-six refinement successfully in 1,102.057 solver-wall
+seconds.  Of the 384 exact children, 85 were `UNSAT` and 299 remained
+`UNKNOWN`; there was no SAT witness and no error.  Parent 1 retained 36 of
+64 children, while parent 6992 retained only seven.  The other four sampled
+parents retained all 64 children at the 12-second budget.  No complete parent
+closed, so this remains a refinement result rather than a K16 decision.  The
+machine-readable transcription is `evidence/v13-kaggle-338156810.json`.
