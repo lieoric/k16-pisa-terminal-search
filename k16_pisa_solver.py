@@ -441,6 +441,29 @@ class TerminalTournamentModel:
                 # Explicit witness that x is not a blocker of 0.
                 m.Add(sum(A(u, x) for u in out_group) >= 1)
 
+            # If a blocker x of the selected zero point has the minimum
+            # possible degree d(0)+1, then
+            #
+            #     N+(x) = N+(0) union {0}.
+            #
+            # Hence x and 0 have identical orientation to every third
+            # vertex.  Encoding this "ordered twin" consequence explicitly
+            # is much stronger than waiting for the degree and cover
+            # constraints to rediscover it late in search.  Two distinct
+            # blockers cannot both be such twins, so at most one gap-one
+            # blocker exists.
+            gap_one_blockers = []
+            for x in blocker_group:
+                gap_one = m.NewBoolVar(f"zero_blocker_{x}_degree_gap_one")
+                m.Add(self.degree[x] == d0 + 1).OnlyEnforceIf(gap_one)
+                m.Add(self.degree[x] >= d0 + 2).OnlyEnforceIf(gap_one.Not())
+                for u in range(1, n):
+                    if u != x:
+                        m.Add(A(x, u) == A(0, u)).OnlyEnforceIf(gap_one)
+                gap_one_blockers.append(gap_one)
+            if gap_one_blockers:
+                m.Add(sum(gap_one_blockers) <= 1)
+
             # Degree sorting within role classes is a safe label symmetry break.
             for group in (out_group, blocker_group, other_in_group):
                 for i in range(len(group) - 1):

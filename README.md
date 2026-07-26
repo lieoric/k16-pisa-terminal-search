@@ -144,3 +144,38 @@ orientation. `SAT` is an independently checked, unconditional K16 Pisa
 witness. `UNSAT` closes the named completion box; all eleven `UNSAT` results
 close this carrier-completion construction but do not prove that arbitrary K16
 tournaments are impossible.
+
+## v5 exact endgame project
+
+The v5 workflow incorporates every exact closure obtained so far instead of
+spending more time in already-dead layers.
+
+The closed global regions are:
+
+- every zero branch `(d,b)=(2,11),(3,9),(4,7),(5,5)`;
+- `(d,b)=(6,3)` with total blocker count `B <= 14`;
+- `(d,b)=(7,1)` with total blocker count `B <= 11`;
+- the degree profiles `7^8 8^8`, `6^1 7^6 8^9`, and `7^9 8^6 9^1`.
+
+Consequently the complete unresolved endpoint is exactly
+
+```text
+(d,b)=(7,1), B>=12
+or
+(d,b)=(6,3), B>=15.
+```
+
+`K16 Pisa v5 exact elite repair and global endpoint partition` attacks this
+endpoint in two stages:
+
+1. Recover all 64 best states from completed run `30190571931` and solve the
+   complete radius-4 Hamming ball around every state with CP-SAT. This replaces
+   the earlier partial repair kernel by an exact neighbourhood.
+2. If no witness is found, partition the entire remaining global endpoint into
+   111 disjoint boxes by total blocker count and the minimum degree among the
+   selected zero point's blockers.
+
+The second stage is exhaustive relative to the listed theorem and solver
+closures. A SAT result is an unconditional independently verified K16 Pisa
+witness. An UNSAT result closes exactly one named box; only all 111 UNSAT
+results close the remaining global endpoint.
