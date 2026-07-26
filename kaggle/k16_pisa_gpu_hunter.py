@@ -635,7 +635,7 @@ def run_shard(
         # offender/blocker kernel, rather than waiting for random mutations.
         if best_loss == 10201:
             signature = tuple(best_bits.detach().cpu().tolist())
-            if signature not in repair_seen and len(repair_seen) < 12:
+            if signature not in repair_seen and len(repair_seen) < 64:
                 repair_seen.add(signature)
                 repair_attempts += 1
                 (

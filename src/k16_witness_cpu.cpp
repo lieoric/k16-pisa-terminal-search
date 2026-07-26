@@ -684,7 +684,7 @@ bool exact_local_repair(
         return false;
     }
     const uint64_t hash = state_hash(current);
-    if (!seen.insert(hash).second || seen.size() > 16) return false;
+    if (!seen.insert(hash).second || seen.size() > 256) return false;
 
     int offender = -1;
     for (int v = 0; v < N; ++v) {
