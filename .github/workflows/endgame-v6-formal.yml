@@ -3,10 +3,14 @@ name: K16 Pisa v6 exact remaining endpoint matrix
 on:
   workflow_dispatch:
     inputs:
-      seconds:
-        description: Exact solver budget per disjoint v6 box
+      d7_seconds:
+        description: Continuous solver budget for each d7/b1 box
         required: true
-        default: "900"
+        default: "3600"
+      d6_seconds:
+        description: Continuous solver budget for each orbit-split d6/b3 box
+        required: true
+        default: "1800"
 
 permissions:
   contents: read
@@ -62,7 +66,7 @@ jobs:
       - gates
       - plan
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       max-parallel: 20
@@ -80,9 +84,14 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p "results/${{ matrix.box }}"
+          if [[ "${{ matrix.box }}" == d7_* ]]; then
+            seconds="${{ inputs.d7_seconds || '3600' }}"
+          else
+            seconds="${{ inputs.d6_seconds || '1800' }}"
+          fi
           python scripts/endpoint_v6.py \
             --box "${{ matrix.box }}" \
-            --seconds "${{ inputs.seconds || '900' }}" \
+            --seconds "$seconds" \
             --workers 4 \
             --seed 20260726 \
             --output "results/${{ matrix.box }}/result.json" \
