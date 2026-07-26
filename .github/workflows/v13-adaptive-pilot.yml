@@ -1,0 +1,201 @@
+name: K16 Pisa v13 adaptive UNKNOWN-cube pilot
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - campaign/c16-circulant-completion
+    paths:
+      - ".github/workflows/v13-adaptive-pilot.yml"
+      - "pisa_verify.py"
+      - "requirements-sat.txt"
+      - "scripts/adaptive_split_v13.py"
+      - "scripts/pisa_sat_v11.py"
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  SMS_COMMIT: 464f12f1fd36b496e7ba9dcbb622b079de02dce4
+
+jobs:
+  prepare:
+    name: Rebuild exact v12 cutoff-64 partition
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements-sat.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake libboost-graph-dev libboost-program-options-dev
+      - name: Build pinned SMS
+        run: |
+          git clone --recursive https://github.com/markirch/sat-modulo-symmetries.git tools/sms
+          git -C tools/sms checkout "$SMS_COMMIT"
+          git -C tools/sms submodule update --init --recursive
+          (
+            cd tools/sms/cadical_sms
+            ./configure -fPIC
+            make -j4
+          )
+          cmake -S tools/sms -B tools/sms/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build tools/sms/build -j4
+      - name: Generate hybrid formula and complete partition
+        run: |
+          mkdir -p prepared
+          python scripts/pisa_sat_v11.py \
+            --n 16 \
+            --min-total-blockers 16 \
+            --endpoint-closures \
+            --cnf prepared/k16-v12-hybrid.cnf \
+            --metadata prepared/k16-v12-hybrid.json
+          set +e
+          tools/sms/build/src/smsg \
+            --vertices 16 \
+            --directed \
+            --dimacs prepared/k16-v12-hybrid.cnf \
+            --simple-assignment-cutoff 64 \
+            --timeout 180 \
+            > prepared/cutoff-64.log
+          sms_status=$?
+          set -e
+          test "$sms_status" -eq 20
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          log = Path("prepared/cutoff-64.log").read_text()
+          cubes = [
+              line.strip().lstrip("\ufeff")
+              for line in log.splitlines()
+              if line.strip().lstrip("\ufeff").startswith("a ")
+              and line.strip().endswith(" 0")
+          ]
+          assert "Result: 20" in log, "SMS partition did not complete"
+          assert len(cubes) == 9788, len(cubes)
+          Path("prepared/cutoff-64.cubes").write_text(
+              "\n".join(cubes) + "\n"
+          )
+          Path("prepared/partition.json").write_text(
+              json.dumps(
+                  {
+                      "cutoff": 64,
+                      "complete": True,
+                      "cubes": len(cubes),
+                      "already_unsat_parent_lines": [8390, 9788],
+                      "open_sample_parent_lines": [
+                          1, 1399, 2797, 4195, 5594, 6992
+                      ],
+                  },
+                  indent=2,
+              )
+              + "\n"
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-prepared-cutoff64
+          path: |
+            prepared/k16-v12-hybrid.cnf
+            prepared/k16-v12-hybrid.json
+            prepared/cutoff-64.cubes
+            prepared/partition.json
+          retention-days: 7
+
+  refine:
+    name: Parent ${{ matrix.parent }} → 16 exact children
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        parent: [1, 1399, 2797, 4195, 5594, 6992]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install SAT dependency
+        run: python -m pip install -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v13-prepared-cutoff64
+          path: prepared
+      - name: Split parent and solve every child
+        run: |
+          mkdir -p results
+          python scripts/adaptive_split_v13.py \
+            --cnf prepared/k16-v12-hybrid.cnf \
+            --cube-file prepared/cutoff-64.cubes \
+            --parent-lines "${{ matrix.parent }}" \
+            --split-depth 4 \
+            --child-timeout 30 \
+            --workers 4 \
+            --output "results/parent-${{ matrix.parent }}.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-parent-${{ matrix.parent }}
+          path: results/
+          retention-days: 30
+
+  aggregate:
+    name: Aggregate exact closures
+    needs: refine
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v13-parent-*
+          path: parent-results
+          merge-multiple: true
+      - name: Build campaign summary
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          records = [
+              json.loads(path.read_text())
+              for path in sorted(Path("parent-results").glob("parent-*.json"))
+          ]
+          parents = [
+              parent
+              for record in records
+              for parent in record["parents"]
+          ]
+          summary = {
+              "model_version": "k16-pisa-v13-github-adaptive-pilot-20260727",
+              "parents_expected": [1, 1399, 2797, 4195, 5594, 6992],
+              "parents_returned": [p["parent_line"] for p in parents],
+              "split_depth": 4,
+              "parents_closed": [
+                  p["parent_line"] for p in parents if p["parent_closed"]
+              ],
+              "counts": {
+                  status: sum(p["counts"][status] for p in parents)
+                  for status in ("sat", "unsat", "unknown", "error")
+              },
+              "parents": parents,
+          }
+          Path("v13-github-summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n"
+          )
+          print(json.dumps(summary, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-adaptive-summary
+          path: v13-github-summary.json
+          retention-days: 30

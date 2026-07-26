@@ -331,3 +331,28 @@ out after 30 seconds.  This selects cutoff 64 for adaptive refinement, but it
 is not a K16 decision; every sampled `UNKNOWN` region remains open.  The
 machine-readable transcription is
 `evidence/v12-kaggle-338154164.json`.
+
+## v13 adaptive refinement
+
+v13 continues only the six cutoff-64 sample parents that v12 left
+`UNKNOWN`: cube lines `1,1399,2797,4195,5594,6992`.  It does not rerun cube
+lines `8390` and `9788`, which v12 already proved `UNSAT`.
+
+For each open parent, `scripts/adaptive_split_v13.py` selects still-unassigned
+unordered tournament edges and enumerates every orientation pattern on those
+edges.  The children are therefore disjoint and exhaustive inside their
+parent; they are not repeated random seeds for the same formula.  A parent is
+closed only if every child is proved `UNSAT`.  `SAT` is accepted only after
+the independent bit-mask verifier succeeds, and every timeout remains
+`UNKNOWN`.
+
+The GitHub pilot uses depth four, hence 16 children for each of six parents
+(96 children total), with one matrix job per parent.  The Kaggle CPU pilot
+uses depth six, hence 64 children per parent (384 total):
+
+```bash
+python scripts/kaggle_v13_adaptive_pilot.py
+```
+
+Both routes rebuild and validate the same complete 9,788-cube SMS partition
+before refinement, and preserve JSON/log artifacts for every result.
