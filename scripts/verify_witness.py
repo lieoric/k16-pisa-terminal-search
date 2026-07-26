@@ -56,7 +56,7 @@ def verify_masks(out: list[int]) -> dict:
                 return {"valid": False, "reason": f"bad pair {u},{v}"}
 
     strong = reach(out) == full and reach(out, reverse=True) == full
-    degrees, second_sizes, margins, blockers = [], [], [], []
+    degrees, second_sizes, margins, blockers, extra_defects = [], [], [], [], []
     for v in range(n):
         n2 = 0
         bits = out[v]
@@ -76,6 +76,18 @@ def verify_masks(out: list[int]) -> dict:
         second_sizes.append(second)
         margins.append(second - degree)
         blockers.append(blocked.bit_count())
+        defects = []
+        in_bits = incoming
+        while in_bits:
+            bit = in_bits & -in_bits
+            x = bit.bit_length() - 1
+            defect = (out[v] & sum(
+                1 << u for u in range(n) if (out[u] >> x) & 1
+            )).bit_count()
+            if defect:
+                defects.append(defect)
+            in_bits ^= bit
+        extra_defects.append(min(defects, default=n))
 
     return {
         "valid": True,
@@ -85,6 +97,10 @@ def verify_masks(out: list[int]) -> dict:
         "second_sizes": second_sizes,
         "margins": margins,
         "blockers": blockers,
+        "extra_blocker_defects": extra_defects,
+        "positive_defect_sum": sum(
+            defect for defect, margin in zip(extra_defects, margins) if margin > 0
+        ),
         "sum_blockers": sum(blockers),
         "arcs": [
             [u, v]
@@ -143,6 +159,22 @@ def main() -> int:
     check["partition"] = partition
     check["declared_status"] = payload.get("status")
     check["source"] = str(args.result)
+
+    for field in (
+        "outdegrees",
+        "second_sizes",
+        "margins",
+        "blockers",
+        "extra_blocker_defects",
+    ):
+        if field in payload and [int(x) for x in payload[field]] != check[field]:
+            raise SystemExit(f"declared {field} disagrees with independent verifier")
+    if (
+        "best_positive_defect_sum" in payload
+        and int(payload["best_positive_defect_sum"])
+        != check["positive_defect_sum"]
+    ):
+        raise SystemExit("declared positive blocker defect sum is inconsistent")
 
     if not partition["valid"]:
         print(json.dumps(check, indent=2), file=sys.stderr)

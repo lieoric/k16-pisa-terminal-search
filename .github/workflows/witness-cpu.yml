@@ -1,4 +1,4 @@
-name: K16 Pisa v6 CPU 64 true partitions
+name: K16 Pisa v7 CPU 64 blocker-repair partitions
 
 on:
   workflow_dispatch:
@@ -6,21 +6,21 @@ on:
       seconds_per_shard:
         description: Search seconds for each disjoint structural partition
         required: true
-        default: "1200"
+        default: "900"
       threads_per_shard:
         description: CPU threads used by each shard
         required: true
         default: "4"
   push:
     branches:
-      - "campaign/k16-witness-v6"
+      - "campaign/k16-witness-v7"
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: k16-witness-v6-cpu-${{ github.ref }}
+  group: k16-witness-v7-cpu-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -133,6 +133,9 @@ jobs:
           print(f"- States evaluated: {r['states_evaluated']:,}")
           print(f"- Best loss: {r['best_loss']}")
           print(f"- Best positive-margin vertices: {r['best_positive_count']}")
+          print(f"- Best blocker defect: {r['best_positive_defect_sum']}")
+          print(f"- Diverse elites retained: {r['elite_pool_size']}")
+          print(f"- Exact local repairs: {r['repair_attempts']} ({r['repair_states']:,} states)")
           print()
           if r["status"] == "WITNESS":
               print("**Independent verifier accepted a K16 Pisa witness.**")

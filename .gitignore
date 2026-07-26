@@ -5,3 +5,4 @@ results/
 logs/
 work_test/
 work_k16_witness_cpu*
+build/

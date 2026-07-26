@@ -20,19 +20,28 @@ def main() -> int:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if data.get("campaign") != "K16-PISA-v6-true-partitions":
+        if data.get("campaign") != "K16-PISA-v7-blocker-breakout-repair":
             continue
         data["_artifact_path"] = str(path)
         records.append(data)
 
     witnesses = [record for record in records if record.get("status") == "WITNESS"]
-    best = min(records, key=lambda record: record.get("best_loss", 10**18), default=None)
+    best = min(
+        records,
+        key=lambda record: (
+            record.get("best_loss", 10**18),
+            record.get("best_positive_defect_sum", 10**18),
+        ),
+        default=None,
+    )
     summary = {
-        "campaign": "K16-PISA-v6-true-partitions",
+        "campaign": "K16-PISA-v7-blocker-breakout-repair",
         "shards_collected": len(records),
         "witnesses": len(witnesses),
         "status": "WITNESS" if witnesses else "NO_WITNESS_IN_COMPLETED_SHARDS",
         "states_evaluated": sum(int(r.get("states_evaluated", 0)) for r in records),
+        "repair_attempts": sum(int(r.get("repair_attempts", 0)) for r in records),
+        "repair_states": sum(int(r.get("repair_states", 0)) for r in records),
         "best": best,
         "witness_records": witnesses,
     }
@@ -43,10 +52,13 @@ def main() -> int:
     print()
     print(f"- Shards collected: **{len(records)}**")
     print(f"- States evaluated: **{summary['states_evaluated']:,}**")
+    print(f"- Exact local repairs: **{summary['repair_attempts']:,}**")
+    print(f"- States checked inside repairs: **{summary['repair_states']:,}**")
     print(f"- Verified witnesses: **{len(witnesses)}**")
     if best:
         print(
             f"- Best loss: **{best.get('best_loss')}** "
+            f"(blocker defect {best.get('best_positive_defect_sum')}) "
             f"({best.get('strategy')}, shard {best.get('shard')})"
         )
     print()

@@ -64,7 +64,7 @@ No credentials or repository secrets are required by the workflows.
 
 ## Heuristic SAT witness campaign
 
-The proof-oriented CP-SAT workflows above remain unchanged. The v6 witness
+The proof-oriented CP-SAT workflows above remain unchanged. The v7 witness
 campaign searches only for one valid K16 Pisa orientation in the two unresolved
 zero-margin branches `(d,b)=(7,1)` and `(6,3)`.
 
@@ -85,10 +85,10 @@ This campaign is deliberately one-sided:
 
 ### GitHub Actions CPU search
 
-`K16 Pisa v6 true-partition smoke` builds the native C++ searcher, proves that
+`K16 Pisa v7 blocker-repair smoke` builds the native C++ searcher, proves that
 the 32 buckets cover each branch without overlap, and samples eight partitions
 from both branches. After it passes, manually dispatch
-`K16 Pisa v6 CPU 64 true partitions`. The full workflow runs 64 jobs with
+`K16 Pisa v7 CPU 64 blocker-repair partitions`. The full workflow runs 64 jobs with
 `max-parallel: 20`:
 
 ```text
@@ -96,10 +96,12 @@ shard  0..31  d7_b1, bucket = shard
 shard 32..63  d6_b3, bucket = shard - 32
 ```
 
-Each four-thread job uses both edge and directed-triangle moves inside its fixed
-bucket. Every job uploads its JSON result, an independent partition/witness
-verification record, and the full log. The aggregate job uploads a campaign
-summary. No secret is required.
+Each four-thread job uses dynamic violated-vertex weights, targeted degree and
+blocker-completion moves, a 32-state diversity pool, and exact radius-six local
+repair when it reaches the one-offender margin-one plateau. Every job uploads
+its JSON result, blocker-defect diagnostics, repair counts, an independent
+partition/witness verification record, and the full log. The aggregate job
+uploads a campaign summary. No secret is required.
 
 ### Kaggle GPU search
 
@@ -113,6 +115,6 @@ Internet: ON
 GPU 0 searches the 32 `(7,1)` partitions while GPU 1 concurrently searches the
 32 `(6,3)` partitions. The PyTorch/CUDA hunter evaluates thousands of
 tournaments in parallel, writes one JSON per partition, and updates separate
-checkpoints under `/kaggle/working/k16_gpu_results_v6`. Download that directory
+checkpoints under `/kaggle/working/k16_gpu_results_v7`. Download that directory
 before a Kaggle session expires. The notebook currently checks out branch
 `agent/witness-hunter`; change `REF` to `main` after the pull request is merged.

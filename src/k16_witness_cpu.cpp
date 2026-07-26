@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -14,6 +15,7 @@
 #include <string>
 #include <thread>
 #include <tuple>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -21,7 +23,9 @@ namespace {
 constexpr int N = 16;
 constexpr int PARTITION_BUCKETS = 32;
 constexpr uint16_t FULL = 0xffffu;
-constexpr uint64_t BASE_SEED = 0x4b31365049534136ULL;  // "K16PISA6"
+constexpr uint64_t BASE_SEED = 0x4b31365049534137ULL;  // "K16PISA7"
+constexpr int ELITE_CAPACITY = 32;
+constexpr int MOVE_CAPACITY = 20;
 
 struct State {
     std::array<uint16_t, N> out{};
@@ -32,17 +36,19 @@ struct Evaluation {
     std::array<int, N> second{};
     std::array<int, N> margin{};
     std::array<int, N> blockers{};
+    std::array<int, N> extra_blocker_defect{};
     int max_margin = std::numeric_limits<int>::min();
     int positive_count = 0;
     int positive_sum = 0;
     int positive_square_sum = 0;
+    int positive_defect_sum = 0;
     int branch_gap = 0;
     int loss = std::numeric_limits<int>::max();
     bool strong = false;
 };
 
 struct Move {
-    std::array<std::pair<int, int>, 3> edges{};
+    std::array<std::pair<int, int>, MOVE_CAPACITY> edges{};
     int count = 0;
 };
 
@@ -57,14 +63,22 @@ struct Config {
 };
 
 struct SharedBest {
+    struct Elite {
+        State state{};
+        Evaluation eval{};
+    };
+
     std::mutex mutex;
     State state{};
     Evaluation eval{};
+    std::vector<Elite> pool;
     bool initialized = false;
     bool witness = false;
 };
 
 std::atomic<uint64_t> evaluated{0};
+std::atomic<uint64_t> repair_attempts{0};
+std::atomic<uint64_t> repair_states{0};
 std::atomic<bool> stop_requested{false};
 
 int bit_count(uint16_t value) {
@@ -234,16 +248,32 @@ Evaluation evaluate(const State& s, int target_degree, int target_blockers) {
         const uint16_t blocked = static_cast<uint16_t>(in_mask & (FULL ^ n2));
         const int b = bit_count(blocked);
         const int m = sec - d;
+        int extra_defect = N;
+        uint16_t incoming = in_mask;
+        while (incoming) {
+            const int x = first_bit(incoming);
+            incoming &= static_cast<uint16_t>(incoming - 1);
+            int defect = 0;
+            uint16_t out_bits = s.out[v];
+            while (out_bits) {
+                const int u = first_bit(out_bits);
+                out_bits &= static_cast<uint16_t>(out_bits - 1);
+                if (arc(s, u, x)) ++defect;
+            }
+            if (defect > 0) extra_defect = std::min(extra_defect, defect);
+        }
 
         e.degree[v] = d;
         e.second[v] = sec;
         e.blockers[v] = b;
         e.margin[v] = m;
+        e.extra_blocker_defect[v] = extra_defect;
         e.max_margin = std::max(e.max_margin, m);
         if (m > 0) {
             ++e.positive_count;
             e.positive_sum += m;
             e.positive_square_sum += m * m;
+            e.positive_defect_sum += extra_defect;
         }
     }
 
@@ -262,6 +292,21 @@ Evaluation evaluate(const State& s, int target_degree, int target_blockers) {
         e.positive_square_sum;
     if (!e.strong) e.loss += 1000000;
     return e;
+}
+
+int64_t dynamic_energy(
+    const Evaluation& e,
+    const std::array<int, N>& weights) {
+    int64_t value = 100000000LL * e.branch_gap;
+    if (!e.strong) value += 1000000000LL;
+    for (int v = 0; v < N; ++v) {
+        if (e.margin[v] <= 0) continue;
+        const int defect = std::min(N, e.extra_blocker_defect[v]);
+        value += static_cast<int64_t>(weights[v]) *
+                 (20000 + 800 * e.margin[v] +
+                  40 * e.margin[v] * e.margin[v] + 120 * defect);
+    }
+    return value;
 }
 
 bool is_witness(const State& s, const Evaluation& e, const Config& cfg) {
@@ -293,6 +338,125 @@ void apply_move(State& s, const Move& move) {
     for (int i = 0; i < move.count; ++i) {
         flip_edge(s, move.edges[i].first, move.edges[i].second);
     }
+}
+
+bool is_free_edge(int u, int v) {
+    if (u == v || u == 0 || v == 0) return false;
+    return !is_ring_edge(u, v);
+}
+
+bool add_move_edge(Move& move, int u, int v) {
+    if (!is_free_edge(u, v) || move.count >= MOVE_CAPACITY) return false;
+    if (u > v) std::swap(u, v);
+    for (int i = 0; i < move.count; ++i) {
+        if (move.edges[i] == std::make_pair(u, v)) return true;
+    }
+    move.edges[move.count++] = {u, v};
+    return true;
+}
+
+int select_positive_vertex(
+    const Evaluation& e,
+    const std::array<int, N>& weights,
+    std::mt19937_64& rng) {
+    int total = 0;
+    for (int v = 0; v < N; ++v) {
+        if (e.margin[v] > 0) total += weights[v] * e.margin[v];
+    }
+    if (total == 0) return -1;
+    int ticket = static_cast<int>(rng() % total);
+    for (int v = 0; v < N; ++v) {
+        if (e.margin[v] <= 0) continue;
+        ticket -= weights[v] * e.margin[v];
+        if (ticket < 0) return v;
+    }
+    return -1;
+}
+
+Move focused_repair_move(
+    const State& s,
+    const Evaluation& e,
+    const std::array<int, N>& weights,
+    const std::vector<std::pair<int, int>>& free_edges,
+    std::mt19937_64& rng) {
+    const int v = select_positive_vertex(e, weights, rng);
+    if (v < 0) {
+        Move fallback;
+        fallback.edges[0] = free_edges[rng() % free_edges.size()];
+        fallback.count = 1;
+        return fallback;
+    }
+
+    // Half the time, directly raise the offender's outdegree by reversing a
+    // mutable incoming edge.  This is the shortest possible degree repair.
+    if ((rng() % 100) < 45) {
+        std::vector<int> incoming;
+        for (int x = 1; x < N; ++x) {
+            if (x != v && arc(s, x, v) && is_free_edge(v, x)) incoming.push_back(x);
+        }
+        if (!incoming.empty()) {
+            Move move;
+            add_move_edge(move, v, incoming[rng() % incoming.size()]);
+            return move;
+        }
+    }
+
+    // Otherwise complete a nearly-blocking in-neighbour x.  The defect edges
+    // are precisely u->x with u in N+(v); reversing all of them makes x beat
+    // v and every out-neighbour of v, hence creates one new blocker of v.
+    struct Candidate {
+        int x;
+        std::vector<int> defect_vertices;
+    };
+    std::vector<Candidate> candidates;
+    for (int x = 1; x < N; ++x) {
+        if (x == v || !arc(s, x, v)) continue;
+        Candidate candidate{x, {}};
+        bool mutable_completion = true;
+        uint16_t bits = s.out[v];
+        while (bits) {
+            const int u = first_bit(bits);
+            bits &= static_cast<uint16_t>(bits - 1);
+            if (!arc(s, u, x)) continue;
+            if (!is_free_edge(u, x)) {
+                mutable_completion = false;
+                break;
+            }
+            candidate.defect_vertices.push_back(u);
+        }
+        if (mutable_completion && !candidate.defect_vertices.empty() &&
+            candidate.defect_vertices.size() <= 6) {
+            candidates.push_back(std::move(candidate));
+        }
+    }
+    if (!candidates.empty()) {
+        std::sort(
+            candidates.begin(), candidates.end(),
+            [](const Candidate& a, const Candidate& b) {
+                return a.defect_vertices.size() < b.defect_vertices.size();
+            });
+        const size_t window = std::min<size_t>(4, candidates.size());
+        const Candidate& chosen = candidates[rng() % window];
+        Move move;
+        for (const int u : chosen.defect_vertices) add_move_edge(move, u, chosen.x);
+
+        // Occasionally pair blocker completion with one local degree repair.
+        if ((rng() % 100) < 30) {
+            std::vector<int> incoming;
+            for (int x = 1; x < N; ++x) {
+                if (x != v && arc(s, x, v) && is_free_edge(v, x)) incoming.push_back(x);
+            }
+            if (!incoming.empty()) {
+                add_move_edge(move, v, incoming[rng() % incoming.size()]);
+            }
+        }
+        if (move.count > 0) return move;
+    }
+
+    Move fallback;
+    fallback.edges[0] = free_edges[rng() % free_edges.size()];
+    fallback.count = 1;
+    return fallback;
 }
 
 Move random_edge_move(
@@ -337,8 +501,32 @@ Move random_triangle_or_edge_move(
 }
 
 bool better(const Evaluation& a, const Evaluation& b) {
-    return std::tie(a.loss, a.branch_gap, a.positive_count, a.positive_sum) <
-           std::tie(b.loss, b.branch_gap, b.positive_count, b.positive_sum);
+    return std::tie(
+               a.loss, a.positive_defect_sum, a.branch_gap,
+               a.positive_count, a.positive_sum) <
+           std::tie(
+               b.loss, b.positive_defect_sum, b.branch_gap,
+               b.positive_count, b.positive_sum);
+}
+
+int state_distance(const State& a, const State& b) {
+    int distance = 0;
+    for (int u = 1; u < N; ++u) {
+        for (int v = u + 1; v < N; ++v) {
+            if (!is_free_edge(u, v)) continue;
+            distance += arc(a, u, v) != arc(b, u, v);
+        }
+    }
+    return distance;
+}
+
+uint64_t state_hash(const State& s) {
+    uint64_t hash = 0xcbf29ce484222325ULL;
+    for (const uint16_t mask : s.out) {
+        hash ^= mask;
+        hash *= 0x100000001b3ULL;
+    }
+    return hash;
 }
 
 void publish_best(
@@ -355,6 +543,7 @@ void publish_best(
         shared.witness = is_witness(s, e, cfg);
         std::cerr << "best thread=" << thread_id
                   << " loss=" << e.loss
+                  << " defect=" << e.positive_defect_sum
                   << " branch_gap=" << e.branch_gap
                   << " positive=" << e.positive_count
                   << " max_margin=" << e.max_margin
@@ -364,6 +553,202 @@ void publish_best(
                   << " zero_rank=" << colex_rank(zero_subset(s)) << "\n";
         if (shared.witness) stop_requested.store(true, std::memory_order_relaxed);
     }
+
+    if (e.branch_gap == 0 && e.positive_count <= 2) {
+        int close_index = -1;
+        for (size_t i = 0; i < shared.pool.size(); ++i) {
+            if (state_distance(s, shared.pool[i].state) < 8) {
+                close_index = static_cast<int>(i);
+                break;
+            }
+        }
+        if (close_index >= 0) {
+            if (better(e, shared.pool[close_index].eval)) {
+                shared.pool[close_index] = {s, e};
+            }
+        } else if (shared.pool.size() < ELITE_CAPACITY) {
+            shared.pool.push_back({s, e});
+        } else {
+            auto worst = std::max_element(
+                shared.pool.begin(), shared.pool.end(),
+                [](const SharedBest::Elite& a, const SharedBest::Elite& b) {
+                    return better(a.eval, b.eval);
+                });
+            if (worst != shared.pool.end() && better(e, worst->eval)) {
+                *worst = {s, e};
+            }
+        }
+    }
+}
+
+bool sample_elite(
+    SharedBest& shared,
+    State& state,
+    std::mt19937_64& rng) {
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    if (shared.pool.empty()) {
+        if (!shared.initialized) return false;
+        state = shared.state;
+        return true;
+    }
+    state = shared.pool[rng() % shared.pool.size()].state;
+    return true;
+}
+
+std::vector<std::pair<int, int>> repair_kernel(
+    const State& s,
+    const Evaluation& e,
+    int offender) {
+    struct RankedEdge {
+        int priority;
+        int u;
+        int v;
+    };
+    std::vector<RankedEdge> ranked;
+    auto add_ranked = [&](int priority, int u, int v) {
+        if (!is_free_edge(u, v)) return;
+        if (u > v) std::swap(u, v);
+        for (auto& item : ranked) {
+            if (item.u == u && item.v == v) {
+                item.priority = std::min(item.priority, priority);
+                return;
+            }
+        }
+        ranked.push_back({priority, u, v});
+    };
+
+    for (int x = 1; x < N; ++x) {
+        if (x != offender) add_ranked(30, offender, x);
+    }
+    struct BlockerCandidate {
+        int defect;
+        int x;
+        std::vector<int> vertices;
+    };
+    std::vector<BlockerCandidate> candidates;
+    for (int x = 1; x < N; ++x) {
+        if (x == offender || !arc(s, x, offender)) continue;
+        BlockerCandidate candidate{0, x, {}};
+        bool mutable_completion = true;
+        uint16_t bits = s.out[offender];
+        while (bits) {
+            const int u = first_bit(bits);
+            bits &= static_cast<uint16_t>(bits - 1);
+            if (!arc(s, u, x)) continue;
+            if (!is_free_edge(u, x)) {
+                mutable_completion = false;
+                break;
+            }
+            ++candidate.defect;
+            candidate.vertices.push_back(u);
+        }
+        if (mutable_completion && candidate.defect > 0) {
+            candidates.push_back(std::move(candidate));
+        }
+    }
+    std::sort(
+        candidates.begin(), candidates.end(),
+        [](const BlockerCandidate& a, const BlockerCandidate& b) {
+            return a.defect < b.defect;
+        });
+    for (size_t i = 0; i < std::min<size_t>(6, candidates.size()); ++i) {
+        for (const int u : candidates[i].vertices) {
+            add_ranked(candidates[i].defect, u, candidates[i].x);
+        }
+    }
+    std::sort(
+        ranked.begin(), ranked.end(),
+        [](const RankedEdge& a, const RankedEdge& b) {
+            return std::tie(a.priority, a.u, a.v) <
+                   std::tie(b.priority, b.u, b.v);
+        });
+    std::vector<std::pair<int, int>> kernel;
+    for (const auto& item : ranked) {
+        if (kernel.size() == 20) break;
+        kernel.emplace_back(item.u, item.v);
+    }
+    (void)e;
+    return kernel;
+}
+
+bool exact_local_repair(
+    State& current,
+    Evaluation& current_eval,
+    const std::array<int, N>& weights,
+    const Config& cfg,
+    const std::chrono::steady_clock::time_point deadline,
+    SharedBest& shared,
+    int thread_id,
+    std::unordered_set<uint64_t>& seen) {
+    if (current_eval.branch_gap != 0 || current_eval.positive_count != 1) {
+        return false;
+    }
+    const uint64_t hash = state_hash(current);
+    if (!seen.insert(hash).second || seen.size() > 16) return false;
+
+    int offender = -1;
+    for (int v = 0; v < N; ++v) {
+        if (current_eval.margin[v] > 0) {
+            offender = v;
+            break;
+        }
+    }
+    if (offender < 0) return false;
+    const auto kernel = repair_kernel(current, current_eval, offender);
+    if (kernel.empty()) return false;
+    repair_attempts.fetch_add(1, std::memory_order_relaxed);
+
+    State candidate = current;
+    State best_state = current;
+    Evaluation best_eval = current_eval;
+    int64_t best_energy = dynamic_energy(current_eval, weights);
+    bool found = false;
+    uint64_t local_evaluated = 0;
+
+    for (int radius = 1; radius <= 6 && !found; ++radius) {
+        std::function<void(int, int)> visit = [&](int start, int remaining) {
+            if (found || std::chrono::steady_clock::now() >= deadline) return;
+            if (remaining == 0) {
+                Evaluation e =
+                    evaluate(candidate, cfg.target_degree, cfg.target_blockers);
+                evaluated.fetch_add(1, std::memory_order_relaxed);
+                repair_states.fetch_add(1, std::memory_order_relaxed);
+                ++local_evaluated;
+                const int64_t energy = dynamic_energy(e, weights);
+                if (energy < best_energy ||
+                    (energy == best_energy && better(e, best_eval))) {
+                    best_energy = energy;
+                    best_state = candidate;
+                    best_eval = e;
+                }
+                if (is_witness(candidate, e, cfg)) {
+                    best_state = candidate;
+                    best_eval = e;
+                    publish_best(shared, candidate, e, cfg, thread_id);
+                    found = true;
+                }
+                return;
+            }
+            const int last =
+                static_cast<int>(kernel.size()) - remaining;
+            for (int i = start; i <= last && !found; ++i) {
+                flip_edge(candidate, kernel[i].first, kernel[i].second);
+                visit(i + 1, remaining - 1);
+                flip_edge(candidate, kernel[i].first, kernel[i].second);
+            }
+        };
+        visit(0, radius);
+    }
+
+    if (best_energy < dynamic_energy(current_eval, weights) ||
+        better(best_eval, current_eval)) {
+        current = best_state;
+        current_eval = best_eval;
+        publish_best(shared, current, current_eval, cfg, thread_id);
+        return true;
+    }
+    (void)local_evaluated;
+    return found;
 }
 
 void worker(
@@ -374,32 +759,30 @@ void worker(
     const std::vector<std::pair<int, int>>& free_edges,
     const std::vector<std::array<int, 3>>& triples,
     const std::vector<uint16_t>& zero_patterns) {
-    const bool triangle_mode = (thread_id % 2) == 1;
     const uint64_t seed = splitmix64(
         BASE_SEED ^
         (static_cast<uint64_t>(cfg.shard) << 32) ^
-        (static_cast<uint64_t>(thread_id) << 1) ^
-        (triangle_mode ? 0x545249414e474c45ULL : 0x454447454d4f4445ULL));
+        (static_cast<uint64_t>(thread_id) << 1));
     std::mt19937_64 rng(seed);
 
-    constexpr int SAMPLE_MOVES = 6;
-    constexpr int RESTART_STEPS = 12000;
-    constexpr int STAGNATION_STEPS = 2500;
+    constexpr int SAMPLE_MOVES = 10;
+    constexpr int RESTART_STEPS = 18000;
+    constexpr int STAGNATION_STEPS = 3600;
+    std::array<int, N> weights{};
+    weights.fill(1);
+    std::unordered_set<uint64_t> repair_seen;
 
     while (!stop_requested.load(std::memory_order_relaxed) &&
            std::chrono::steady_clock::now() < deadline) {
         State current = random_state(rng, zero_patterns);
 
-        // Occasionally restart near the current global elite, with a kick.
-        if ((rng() % 100) < 55) {
-            std::lock_guard<std::mutex> lock(shared.mutex);
-            if (shared.initialized) {
-                current = shared.state;
-                const int kicks = 4 + static_cast<int>(rng() % 13);
-                for (int k = 0; k < kicks; ++k) {
-                    const auto& edge = free_edges[rng() % free_edges.size()];
-                    flip_edge(current, edge.first, edge.second);
-                }
+        // Restart from a diverse elite pool, then kick far enough to leave the
+        // previous basin.  This replaces the v6 single-global-elite collapse.
+        if ((rng() % 100) < 70 && sample_elite(shared, current, rng)) {
+            const int kicks = 6 + static_cast<int>(rng() % 19);
+            for (int k = 0; k < kicks; ++k) {
+                const auto& edge = free_edges[rng() % free_edges.size()];
+                flip_edge(current, edge.first, edge.second);
             }
         }
 
@@ -407,6 +790,7 @@ void worker(
             evaluate(current, cfg.target_degree, cfg.target_blockers);
         evaluated.fetch_add(1, std::memory_order_relaxed);
         publish_best(shared, current, current_eval, cfg, thread_id);
+        int64_t current_energy = dynamic_energy(current_eval, weights);
         int stagnation = 0;
 
         for (int step = 0;
@@ -415,47 +799,94 @@ void worker(
              !stop_requested.load(std::memory_order_relaxed) &&
              std::chrono::steady_clock::now() < deadline;
              ++step) {
+            if (current_eval.branch_gap == 0 &&
+                current_eval.positive_count == 1 &&
+                current_eval.max_margin == 1) {
+                if (exact_local_repair(
+                        current, current_eval, weights, cfg, deadline,
+                        shared, thread_id, repair_seen)) {
+                    current_energy = dynamic_energy(current_eval, weights);
+                    stagnation = 0;
+                    if (is_witness(current, current_eval, cfg)) break;
+                }
+            }
+
             Move chosen{};
             Evaluation chosen_eval{};
+            int64_t chosen_energy = std::numeric_limits<int64_t>::max();
             bool chosen_set = false;
 
             for (int sample = 0; sample < SAMPLE_MOVES; ++sample) {
-                Move move = triangle_mode
-                    ? random_triangle_or_edge_move(
+                Move move;
+                const int roll = static_cast<int>(rng() % 100);
+                if (roll < 68 && current_eval.positive_count > 0) {
+                    move = focused_repair_move(
+                        current, current_eval, weights, free_edges, rng);
+                } else if (roll < 88) {
+                    move = random_triangle_or_edge_move(
                           current, current_eval, cfg.target_degree,
-                          free_edges, triples, rng)
-                    : random_edge_move(
-                          current, current_eval, cfg.target_degree,
-                          free_edges, rng);
+                          free_edges, triples, rng);
+                } else {
+                    move = random_edge_move(
+                        current, current_eval, cfg.target_degree,
+                        free_edges, rng);
+                }
                 apply_move(current, move);
                 Evaluation candidate =
                     evaluate(current, cfg.target_degree, cfg.target_blockers);
                 evaluated.fetch_add(1, std::memory_order_relaxed);
                 apply_move(current, move);
+                const int64_t candidate_energy =
+                    dynamic_energy(candidate, weights);
 
-                if (!chosen_set || better(candidate, chosen_eval)) {
+                if (!chosen_set || candidate_energy < chosen_energy ||
+                    (candidate_energy == chosen_energy &&
+                     better(candidate, chosen_eval))) {
                     chosen = move;
                     chosen_eval = candidate;
+                    chosen_energy = candidate_energy;
                     chosen_set = true;
                 }
             }
 
-            const int delta = chosen_eval.loss - current_eval.loss;
+            const int64_t delta = chosen_energy - current_energy;
             const double progress = static_cast<double>(step) / RESTART_STEPS;
-            const double temperature = 2500.0 * (1.0 - progress) + 25.0;
+            const double temperature = 18000.0 * (1.0 - progress) + 120.0;
             const double probability =
                 delta <= 0 ? 1.0 : std::exp(-static_cast<double>(delta) / temperature);
             std::uniform_real_distribution<double> uniform(0.0, 1.0);
-            const bool noisy_accept = (rng() % 1000) < 15;
+            const bool noisy_accept = (rng() % 1000) < 10;
 
             if (delta <= 0 || noisy_accept || uniform(rng) < probability) {
                 apply_move(current, chosen);
-                const bool improved = better(chosen_eval, current_eval);
+                const bool improved =
+                    chosen_energy < current_energy ||
+                    (chosen_energy == current_energy &&
+                     better(chosen_eval, current_eval));
                 current_eval = chosen_eval;
+                current_energy = chosen_energy;
                 stagnation = improved ? 0 : stagnation + 1;
                 publish_best(shared, current, current_eval, cfg, thread_id);
             } else {
                 ++stagnation;
+            }
+
+            // NuWLS-style constraint weighting: a repeatedly violated vertex
+            // gains influence until the walk is pushed out of the plateau.
+            if (stagnation > 0 && stagnation % 400 == 0) {
+                int offender = -1;
+                for (int v = 0; v < N; ++v) {
+                    if (current_eval.margin[v] > 0 &&
+                        (offender < 0 ||
+                         weights[v] * current_eval.margin[v] >
+                             weights[offender] * current_eval.margin[offender])) {
+                        offender = v;
+                    }
+                }
+                if (offender >= 0) {
+                    weights[offender] = std::min(64, weights[offender] + 1);
+                    current_energy = dynamic_energy(current_eval, weights);
+                }
             }
         }
     }
@@ -538,6 +969,40 @@ bool self_test() {
         }
         if (total != expected) return false;
     }
+
+    std::mt19937_64 rng(123456789ULL);
+    Config cfg;
+    cfg.target_degree = 7;
+    cfg.target_blockers = 1;
+    cfg.bucket = 0;
+    const auto patterns = build_zero_patterns(7, 0);
+    const auto free_edges = build_free_edges();
+    for (int trial = 0; trial < 100; ++trial) {
+        State state = random_state(rng, patterns);
+        const Evaluation e = evaluate(state, 7, 1);
+        if (!validate_tournament(state) || !in_partition(state, cfg)) return false;
+        for (int v = 0; v < N; ++v) {
+            if (e.margin[v] != 15 - 2 * e.degree[v] - e.blockers[v]) {
+                return false;
+            }
+            int manual_extra = N;
+            for (int x = 0; x < N; ++x) {
+                if (x == v || !arc(state, x, v)) continue;
+                int defect = 0;
+                uint16_t bits = state.out[v];
+                while (bits) {
+                    const int u = first_bit(bits);
+                    bits &= static_cast<uint16_t>(bits - 1);
+                    defect += arc(state, u, x);
+                }
+                if (defect > 0) manual_extra = std::min(manual_extra, defect);
+            }
+            if (manual_extra != e.extra_blocker_defect[v]) return false;
+        }
+        const auto edge = free_edges[rng() % free_edges.size()];
+        flip_edge(state, edge.first, edge.second);
+        if (!in_partition(state, cfg)) return false;
+    }
     return true;
 }
 
@@ -567,14 +1032,14 @@ void write_json(
     const auto bucket_patterns =
         build_zero_patterns(cfg.target_degree, cfg.bucket);
     out << "{\n";
-    out << "  \"campaign\": \"K16-PISA-v6-true-partitions\",\n";
+    out << "  \"campaign\": \"K16-PISA-v7-blocker-breakout-repair\",\n";
     out << "  \"platform\": \"github-cpu\",\n";
     out << "  \"status\": \"" << (witness ? "WITNESS" : "NO_WITNESS") << "\",\n";
     out << "  \"shard\": " << cfg.shard << ",\n";
     out << "  \"strategy\": \""
         << (cfg.target_degree == 7 ? "d7_b1" : "d6_b3")
         << "_bucket_" << std::setw(2) << std::setfill('0') << cfg.bucket
-        << "_hybrid_threads";
+        << "_dynamic_blocker_repair";
     out << "\",\n";
     out << std::setfill(' ');
     out << "  \"partition_scheme\": "
@@ -592,7 +1057,14 @@ void write_json(
     out << "  \"wall_seconds\": " << std::fixed << std::setprecision(3)
         << wall_seconds << ",\n";
     out << "  \"states_evaluated\": " << states_evaluated << ",\n";
+    out << "  \"repair_attempts\": "
+        << repair_attempts.load(std::memory_order_relaxed) << ",\n";
+    out << "  \"repair_states\": "
+        << repair_states.load(std::memory_order_relaxed) << ",\n";
+    out << "  \"elite_pool_size\": " << shared.pool.size() << ",\n";
     out << "  \"best_loss\": " << shared.eval.loss << ",\n";
+    out << "  \"best_positive_defect_sum\": "
+        << shared.eval.positive_defect_sum << ",\n";
     out << "  \"best_branch_gap\": " << shared.eval.branch_gap << ",\n";
     out << "  \"best_max_margin\": " << shared.eval.max_margin << ",\n";
     out << "  \"best_positive_count\": " << shared.eval.positive_count << ",\n";
@@ -606,6 +1078,8 @@ void write_json(
     out << "  \"second_sizes\": " << json_array(shared.eval.second) << ",\n";
     out << "  \"margins\": " << json_array(shared.eval.margin) << ",\n";
     out << "  \"blockers\": " << json_array(shared.eval.blockers) << ",\n";
+    out << "  \"extra_blocker_defects\": "
+        << json_array(shared.eval.extra_blocker_defect) << ",\n";
     out << "  \"witness_verified_in_process\": "
         << (witness && validate_tournament(shared.state) ? "true" : "false") << "\n";
     out << "}\n";
@@ -685,6 +1159,9 @@ int main(int argc, char** argv) {
                   << " branch=" << (cfg.target_degree == 7 ? "d7_b1" : "d6_b3")
                   << " bucket=" << cfg.bucket
                   << " loss=" << shared.eval.loss
+                  << " defect=" << shared.eval.positive_defect_sum
+                  << " elites=" << shared.pool.size()
+                  << " repairs=" << repair_attempts.load()
                   << " states=" << evaluated.load()
                   << " seconds=" << std::fixed << std::setprecision(2)
                   << wall_seconds << "\n";

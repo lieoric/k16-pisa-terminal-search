@@ -1,4 +1,4 @@
-name: K16 Pisa v6 true-partition smoke
+name: K16 Pisa v7 blocker-repair smoke
 
 on:
   workflow_dispatch:
@@ -46,14 +46,14 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build native hunter
         run: g++ -std=c++17 -O3 -DNDEBUG -pthread src/k16_witness_cpu.cpp -o k16_witness_cpu
-      - name: Run ten-second witness shard
+      - name: Run twenty-second witness shard
         shell: bash
         run: |
           set -o pipefail
           mkdir -p "results/shard-${{ matrix.shard }}"
           ./k16_witness_cpu \
             --shard "${{ matrix.shard }}" \
-            --seconds 10 \
+            --seconds 20 \
             --threads 4 \
             --output "results/shard-${{ matrix.shard }}/result.json" \
             2>&1 | tee "results/shard-${{ matrix.shard }}/run.log"
@@ -78,6 +78,9 @@ jobs:
           print(f"- Status: **{r['status']}**")
           print(f"- States: {r['states_evaluated']:,}")
           print(f"- Best loss: {r['best_loss']}")
+          print(f"- Best blocker defect: {r['best_positive_defect_sum']}")
+          print(f"- Diverse elites retained: {r['elite_pool_size']}")
+          print(f"- Exact repairs: {r['repair_attempts']} ({r['repair_states']:,} states)")
           print()
           print("`NO_WITNESS` is a successful heuristic run, not an UNSAT claim.")
           PY
