@@ -133,7 +133,26 @@ def ensure_sms() -> Path:
         timeout=900,
     )
     if not binary.exists():
-        raise RuntimeError("SMS build did not create smsg")
+        candidates = [
+            candidate
+            for candidate in sms_root.rglob("smsg")
+            if candidate.is_file()
+            and os.access(candidate, os.X_OK)
+            and ".git" not in candidate.parts
+        ]
+        if candidates:
+            binary = min(candidates, key=lambda candidate: len(candidate.parts))
+    if not binary.exists():
+        built_files = sorted(
+            str(candidate.relative_to(sms_root))
+            for candidate in (sms_root / "build").rglob("*")
+            if candidate.is_file() and os.access(candidate, os.X_OK)
+        )
+        raise RuntimeError(
+            "SMS build did not create smsg; executable build files: "
+            + ", ".join(built_files[:30])
+        )
+    print("SMS binary:", binary, flush=True)
     return binary
 
 
