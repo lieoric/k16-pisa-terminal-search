@@ -67,6 +67,24 @@ def build_sms(binary: Path) -> None:
     run(["cmake", "--build", str(source / "build"), "-j4"])
 
 
+def ensure_system_packages() -> None:
+    if not shutil.which("apt-get"):
+        return
+    run(["apt-get", "update", "-qq"])
+    run(
+        [
+            "apt-get",
+            "install",
+            "-y",
+            "-qq",
+            "build-essential",
+            "cmake",
+            "libboost-graph-dev",
+            "libboost-program-options-dev",
+        ]
+    )
+
+
 def prepare_exact_inputs(cnf: Path, cubes: Path) -> None:
     prepared = cnf.parent
     prepared.mkdir(parents=True, exist_ok=True)
@@ -145,6 +163,7 @@ def main() -> int:
             str(REPO_ROOT / "requirements-sat.txt"),
         ]
     )
+    ensure_system_packages()
     binary = WORK_ROOT / "tools" / "sms" / "build" / "src" / "smsg"
     build_sms(binary)
 
