@@ -1,0 +1,117 @@
+name: K16 Pisa residual refinement 18-box matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      exact_seconds:
+        description: Seconds for each exact total-blocker layer B=12,...,19
+        required: true
+        default: "900"
+      residual_seconds:
+        description: Seconds per seed for each B>=20 tail box (two seeds)
+        required: true
+        default: "1800"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k16-pisa-residual-refinement
+  cancel-in-progress: false
+
+jobs:
+  gates:
+    name: Positive regression gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run all three positive gates
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python k16_pisa_solver.py --gates-only --output-dir results \
+            2>&1 | tee logs/gates.log
+      - name: Summarize gates
+        run: python scripts/result_summary.py results/k16_pisa_formal_gates.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload gate evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: refinement-gates
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+
+  refinement:
+    name: Refine ${{ matrix.box }}
+    needs: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 18
+      matrix:
+        box:
+          - d7_b1_eq12
+          - d7_b1_eq13
+          - d7_b1_eq14
+          - d7_b1_eq15
+          - d7_b1_eq16
+          - d7_b1_eq17
+          - d7_b1_eq18
+          - d7_b1_eq19
+          - d7_b1_ge20
+          - d6_b3_eq12
+          - d6_b3_eq13
+          - d6_b3_eq14
+          - d6_b3_eq15
+          - d6_b3_eq16
+          - d6_b3_eq17
+          - d6_b3_eq18
+          - d6_b3_eq19
+          - d6_b3_ge20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run residual-refinement box
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python k16_pisa_solver.py \
+            --box "${{ matrix.box }}" \
+            --exact-seconds "${{ inputs.exact_seconds }}" \
+            --residual-seconds "${{ inputs.residual_seconds }}" \
+            --output-dir results \
+            2>&1 | tee "logs/${{ matrix.box }}.log"
+      - name: Summarize logical result
+        if: always()
+        run: |
+          python scripts/result_summary.py \
+            "results/k16_pisa_formal_${{ matrix.box }}.json" \
+            --fail-on-unknown >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload JSON and complete log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: refinement-${{ matrix.box }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
