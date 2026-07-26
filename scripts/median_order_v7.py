@@ -42,6 +42,7 @@ from k16_pisa_solver import (  # noqa: E402
     EXCLUDED_PROFILES,
     TerminalTournamentModel,
     arc,
+    exact_and,
     extract_full,
     fixed_edges_from_out,
     near_regular_even,
@@ -50,12 +51,35 @@ from k16_pisa_solver import (  # noqa: E402
 )
 
 N = 16
-MODEL_VERSION = "k16-pisa-v7-local-median-feed-prefix-cuts-20260727"
+MODEL_VERSION = "k16-pisa-v7.1-lmo-v6-unknown-only-20260727"
 FIXED_LMO = tuple(range(1, N)) + (0,)
+CUBE_EDGES = ((0, 1), (0, 2), (0, 3))
+CUBE_COUNT = 1 << len(CUBE_EDGES)
 GATE12 = [
     0x1C6, 0x9C4, 0x618, 0xC33, 0xC23, 0x9C7,
     0x69C, 0x71C, 0x65C, 0xC3B, 0x823, 0x1C5,
 ]
+
+# Exact v6 closures obtained in run 30203156507.  The v7.1 formulation
+# translates these orbit labels into invariant conditions around the LMO feed
+# vertex, so none of the 21 v6-UNSAT boxes is searched again.  The five whole
+# layers B14/B15 are absent from BOXES; the 16 entries below are subboxes
+# inside the six remaining parent layers.
+D7_CLOSED_BLOCKER_DEGREES = {
+    16: {11, 12},
+    17: {11, 12, 13},
+    18: {12, 13},
+    19: {13, 14},
+}
+D6_CLOSED_MIN_DEGREE_WINS = {
+    (9, 2),
+    (10, 2),
+    (11, 2),
+    (12, 1),
+    (12, 2),
+    (13, 1),
+    (13, 2),
+}
 
 
 def box_specs() -> dict[str, dict]:
@@ -84,7 +108,13 @@ BOXES = box_specs()
 
 def matrix_json() -> str:
     return json.dumps(
-        {"include": [{"box": box} for box in sorted(BOXES)]},
+        {
+            "include": [
+                {"box": box, "cube": cube}
+                for box in sorted(BOXES)
+                for cube in range(CUBE_COUNT)
+            ]
+        },
         separators=(",", ":"),
     )
 
@@ -188,6 +218,103 @@ def add_local_median_constraints(
         m.AddBoolOr([tm.A(v, u) for u in prefix for v in suffix])
 
 
+def _reified_equal(model, value, target: int, name: str):
+    flag = model.NewBoolVar(name)
+    model.Add(value == target).OnlyEnforceIf(flag)
+    model.Add(value != target).OnlyEnforceIf(flag.Not())
+    return flag
+
+
+def add_v6_unknown_only_cuts(
+    tm: TerminalTournamentModel,
+    spec: dict,
+) -> int:
+    """Exclude exactly the orbit subboxes proved UNSAT by completed v6.
+
+    For d7/b1 the unique blocker's degree is label-invariant.
+
+    For d6/b3, an anchor is any minimum-degree blocker of the feed.  The v6
+    pattern 00/01/11 is exactly the number 0/1/2 of other feed blockers beaten
+    by that anchor.  We forbid every (minimum degree, win count) pair whose
+    complete v6 orbit box was UNSAT.  The construction is label-invariant and
+    therefore compatible with the fixed local median order.
+    """
+    m = tm.model
+    degree = int(spec["degree"])
+    blockers = int(spec["blockers"])
+
+    if (degree, blockers) == (7, 1):
+        total_b = spec["total_b"]
+        excluded = D7_CLOSED_BLOCKER_DEGREES.get(total_b, set())
+        for x in range(1, N):
+            q = tm.blocker[(0, x)]
+            for closed_degree in excluded:
+                m.Add(tm.degree[x] != closed_degree).OnlyEnforceIf(q)
+        return len(excluded)
+
+    if (degree, blockers) != (6, 3):
+        return 0
+
+    # q(0,x) selects the three blockers of the feed.  For each possible
+    # anchor x, compute whether it has minimum blocker degree and how many of
+    # the other selected blockers it beats.
+    for x in range(1, N):
+        qx = tm.blocker[(0, x)]
+        minimum_conditions = [qx]
+        anchor_wins = []
+
+        for y in range(1, N):
+            if y == x:
+                continue
+            qy = tm.blocker[(0, y)]
+
+            le = m.NewBoolVar(f"v71_d_{x}_le_d_{y}")
+            m.Add(tm.degree[x] <= tm.degree[y]).OnlyEnforceIf(le)
+            m.Add(tm.degree[x] > tm.degree[y]).OnlyEnforceIf(le.Not())
+
+            # min_ok iff y is not a feed blocker, or d(x) <= d(y).
+            min_ok = m.NewBoolVar(f"v71_min_ok_{x}_{y}")
+            m.AddBoolOr([qy.Not(), le]).OnlyEnforceIf(min_ok)
+            m.Add(qy == 1).OnlyEnforceIf(min_ok.Not())
+            m.Add(le == 0).OnlyEnforceIf(min_ok.Not())
+            minimum_conditions.append(min_ok)
+
+            win = m.NewBoolVar(f"v71_anchor_{x}_beats_blocker_{y}")
+            exact_and(m, win, [qy, tm.A(x, y)])
+            anchor_wins.append(win)
+
+        is_minimum_blocker = m.NewBoolVar(f"v71_minimum_blocker_{x}")
+        exact_and(m, is_minimum_blocker, minimum_conditions)
+
+        wins_count = m.NewIntVar(0, 3, f"v71_anchor_blocker_wins_{x}")
+        m.Add(wins_count == sum(anchor_wins))
+        degree_flags = {
+            d: _reified_equal(m, tm.degree[x], d, f"v71_anchor_{x}_degree_{d}")
+            for d in {d for d, _ in D6_CLOSED_MIN_DEGREE_WINS}
+        }
+        wins_flags = {
+            w: _reified_equal(m, wins_count, w, f"v71_anchor_{x}_wins_{w}")
+            for w in {w for _, w in D6_CLOSED_MIN_DEGREE_WINS}
+        }
+
+        for closed_degree, closed_wins in D6_CLOSED_MIN_DEGREE_WINS:
+            forbidden = m.NewBoolVar(
+                f"v71_closed_anchor_{x}_d{closed_degree}_w{closed_wins}"
+            )
+            exact_and(
+                m,
+                forbidden,
+                [
+                    is_minimum_blocker,
+                    degree_flags[closed_degree],
+                    wins_flags[closed_wins],
+                ],
+            )
+            m.Add(forbidden == 0)
+
+    return len(D6_CLOSED_MIN_DEGREE_WINS)
+
+
 def build_model(spec: dict, *, fixed=None, n: int = N) -> TerminalTournamentModel:
     total_args = {}
     if spec.get("total_b") == "20+":
@@ -207,7 +334,17 @@ def build_model(spec: dict, *, fixed=None, n: int = N) -> TerminalTournamentMode
     tm.model.Add(tm.degree[0] == int(spec["degree"]))
     tm.model.Add(tm.bcount[0] == int(spec["blockers"]))
     add_local_median_constraints(tm, tuple(range(1, n)) + (0,))
+    if n == N:
+        add_v6_unknown_only_cuts(tm, spec)
     return tm
+
+
+def add_cube_constraints(tm: TerminalTournamentModel, cube: int) -> None:
+    if not 0 <= cube < CUBE_COUNT:
+        raise ValueError(f"cube must be in 0..{CUBE_COUNT - 1}")
+    for bit_index, (u, v) in enumerate(CUBE_EDGES):
+        value = (cube >> bit_index) & 1
+        tm.model.Add(tm.A(u, v) == value)
 
 
 def configure(seconds: int, workers: int, seed: int) -> cp_model.CpSolver:
@@ -276,12 +413,14 @@ def run_gates(seconds: int, workers: int) -> dict:
 
 def solve_box(
     box: str,
+    cube: int,
     seconds: int,
     workers: int,
     seed: int,
 ) -> dict:
     spec = BOXES[box]
     tm = build_model(spec)
+    add_cube_constraints(tm, cube)
     solver = configure(seconds, workers, seed)
     started = time.time()
     status = solver.Solve(tm.model)
@@ -298,6 +437,12 @@ def solve_box(
         "model_version": MODEL_VERSION,
         "algorithm": "local median order feedback plus prefix-cut strongness",
         "box": box,
+        "cube": cube,
+        "cube_bits": [
+            (cube >> bit_index) & 1
+            for bit_index in range(len(CUBE_EDGES))
+        ],
+        "cube_edges": [list(edge) for edge in CUBE_EDGES],
         "status": logical_status,
         "solver_status": solver_status,
         "solver_level_exact": status == cp_model.INFEASIBLE,
@@ -310,9 +455,10 @@ def solve_box(
         "fixed_local_median_order": list(FIXED_LMO),
         "feedback_constraints": N * (N - 1),
         "strong_prefix_cuts": N - 1,
+        "v6_exact_subboxes_excluded": add_v6_unknown_only_cuts_count(spec),
         "coverage": (
-            "The full exact parent layer under a WLOG local median order; "
-            "independent of the v6 anchor-orbit encoding"
+            "One of eight mutually exclusive labelled LMO cubes in the full "
+            "parent layer. All eight cubes exactly cover that layer."
         ),
         "dependencies": {
             "v6_closed_layers": "d7/b1 total blockers 14 and 15 excluded",
@@ -332,9 +478,18 @@ def solve_box(
     return record
 
 
+def add_v6_unknown_only_cuts_count(spec: dict) -> int:
+    if (spec["degree"], spec["blockers"]) == (7, 1):
+        return len(D7_CLOSED_BLOCKER_DEGREES.get(spec["total_b"], set()))
+    if (spec["degree"], spec["blockers"]) == (6, 3):
+        return len(D6_CLOSED_MIN_DEGREE_WINS)
+    return 0
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--box", choices=sorted(BOXES))
+    parser.add_argument("--cube", type=int, choices=range(CUBE_COUNT))
     parser.add_argument("--list-boxes", action="store_true")
     parser.add_argument("--matrix", action="store_true")
     parser.add_argument("--gates-only", action="store_true")
@@ -363,7 +518,15 @@ def main() -> int:
     else:
         if not args.box:
             raise SystemExit("--box is required unless listing/matrix/gates")
-        record = solve_box(args.box, args.seconds, args.workers, args.seed)
+        if args.cube is None:
+            raise SystemExit("--cube is required for an exact box solve")
+        record = solve_box(
+            args.box,
+            args.cube,
+            args.seconds,
+            args.workers,
+            args.seed,
+        )
 
     print(json.dumps(record, indent=2), flush=True)
     if args.output:

@@ -1,4 +1,4 @@
-name: K16 Pisa v7 local-median-order smoke
+name: K16 Pisa v7.1 unknown-only local-median smoke
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: k16-pisa-v7-median-smoke
+  group: k16-pisa-v7-1-median-smoke
   cancel-in-progress: true
 
 jobs:
@@ -38,27 +38,22 @@ jobs:
             --output results/gates.json
       - uses: actions/upload-artifact@v7
         with:
-          name: endgame-v7-median-smoke-gates
+          name: endgame-v7-1-median-smoke-gates
           path: results/
           if-no-files-found: error
           retention-days: 90
 
   boxes:
-    name: Smoke ${{ matrix.box }}
+    name: Smoke ${{ matrix.box }} cube ${{ matrix.cube }}
     needs: gates
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      max-parallel: 6
+      max-parallel: 12
       matrix:
-        box:
-          - lmo_d7_b1_B16
-          - lmo_d7_b1_B17
-          - lmo_d7_b1_B18
-          - lmo_d7_b1_B19
-          - lmo_d7_b1_B20plus
-          - lmo_d6_b3_B20plus
+        box: [lmo_d7_b1_B16, lmo_d7_b1_B17, lmo_d7_b1_B18, lmo_d7_b1_B19, lmo_d7_b1_B20plus, lmo_d6_b3_B20plus]
+        cube: [0, 7]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -71,13 +66,14 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          mkdir -p "results/${{ matrix.box }}"
+          mkdir -p "results/${{ matrix.box }}/cube-${{ matrix.cube }}"
           python scripts/median_order_v7.py \
             --box "${{ matrix.box }}" \
+            --cube "${{ matrix.cube }}" \
             --seconds 10 --workers 4 \
-            --seed 20260727 \
-            --output "results/${{ matrix.box }}/result.json" \
-            2>&1 | tee "results/${{ matrix.box }}/run.log"
+            --seed "$((20260727 + ${{ matrix.cube }}))" \
+            --output "results/${{ matrix.box }}/cube-${{ matrix.cube }}/result.json" \
+            2>&1 | tee "results/${{ matrix.box }}/cube-${{ matrix.cube }}/run.log"
       - name: Add logical result to summary
         if: always()
         shell: bash
@@ -85,12 +81,12 @@ jobs:
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json
           from pathlib import Path
-          p = Path("results/${{ matrix.box }}/result.json")
+          p = Path("results/${{ matrix.box }}/cube-${{ matrix.cube }}/result.json")
           if not p.exists():
               print("## ERROR: result.json was not produced")
           else:
               r = json.loads(p.read_text())
-              print(f"## {r['box']}: {r['status']}")
+              print(f"## {r['box']} cube {r['cube']}: {r['status']}")
               print(f"- Feed zero type: `{tuple(r['feed_zero_type'])}`")
               print(f"- Total blockers: `{r['total_blockers']}`")
               print(f"- Branches: `{r['branches']}`")
@@ -104,7 +100,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: endgame-v7-median-smoke-${{ matrix.box }}
-          path: results/${{ matrix.box }}/
+          name: endgame-v7-1-median-smoke-${{ matrix.box }}-cube-${{ matrix.cube }}
+          path: results/${{ matrix.box }}/cube-${{ matrix.cube }}/
           if-no-files-found: warn
           retention-days: 90

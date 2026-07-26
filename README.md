@@ -198,9 +198,9 @@ closures. A SAT result is an unconditional independently verified K16 Pisa
 witness. An UNSAT result closes exactly one named box; only all 111 UNSAT
 results close the remaining global endpoint.
 
-## v7 local-median-order exact campaign
+## v7.1 local-median-order exact campaign
 
-The v7 campaign is an independent exact formulation based on Havet and
+The v7.1 campaign is an independent exact formulation based on Havet and
 Thomasse's local median orders.  We may relabel a local median order as
 
 ```text
@@ -214,18 +214,27 @@ so exact strong connectivity needs only one reverse arc across each of the
 15 proper prefix cuts; the score-permutation and rooted-role encodings are
 not used.
 
+The completed v6 run closed 21 of its 54 orbit boxes. Five of those closures
+remove the whole `B=14,15` layers; the remaining 16 are translated into
+label-invariant blocker-degree and blocker-pattern nogoods. Consequently v7.1
+searches only the union represented by the 33 v6 `UNKNOWN` artifacts.
+
 The smoke workflow validates fixed K12 and K14 Pisa witnesses under this
-encoding, then builds all six remaining parent layers for ten seconds.  The
-formal workflow runs the six complete layers in parallel:
+encoding, then samples the resumable cube machinery. The formal workflow
+splits every remaining parent layer by the three feed edges `(0,1)`, `(0,2)`,
+and `(0,3)`. The resulting eight mutually exclusive cubes cover each parent
+layer exactly, giving 48 jobs in total:
 
 ```text
 (d,b)=(7,1), B=16,17,18,19,>=20
 (d,b)=(6,3), B>=20
 ```
 
-Each `UNSAT` result closes the full named parent layer, rather than a single
-anchor-orbit slice. `SAT` is accepted only after the independent bit-mask
-verifier confirms the K16 witness.
+Each `UNSAT` cube is permanently closed and never needs to run again.
+An `UNKNOWN` cube can be split further by additional fixed edges without
+restarting the completed cubes. All eight `UNSAT` results close the named
+parent layer. `SAT` is accepted only after the independent bit-mask verifier
+confirms the K16 witness.
 
 Primary reference:
 [Havet and Thomasse, Median Orders of Tournaments](https://www.math.ru.nl/OpenGraphProblems/TimV/%5BHavet%20and%20Thomass%C3%A9%5D%20Median%20Orders%20of%20Tournaments.pdf).
