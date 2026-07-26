@@ -1,5 +1,23 @@
 # K16 Pisa tournament terminal search
 
+## Current two-platform campaign (v6/v8)
+
+The two platforms deliberately do different work:
+
+- **GitHub Actions v6** is the exact proof track. It refines precisely the
+  43 v5 endpoint boxes that remained `UNKNOWN` into 54 disjoint
+  anchor-orbit boxes (36 in the `(d,b)=(7,1)` branch and 18 in the
+  `(6,3)` branch). Every job uploads `result.json` and `run.log`.
+  `INFEASIBLE` closes only the named box; `UNKNOWN` closes nothing.
+- **Kaggle GPU v8** is witness-only. Its 54 targets are structurally
+  different endpoint strata, and its main move is a pure directed
+  3-cycle reversal, which explores a fixed score sequence without first
+  destroying it. A hit is independently verified; a miss is never reported
+  as an UNSAT result.
+
+Run the short GitHub workflow `K16 Pisa v6 rooted-role smoke` before
+dispatching `K16 Pisa v6 exact remaining endpoint matrix`.
+
 This repository runs the K16 Pisa v4.1 CP-SAT terminal campaign as 18 independent
 GitHub Actions jobs. Each job handles one zero-margin branch and one total-blocker
 layer, writes a machine-readable JSON result, keeps the complete console log, and

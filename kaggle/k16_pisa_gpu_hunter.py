@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Batched CUDA witness search for K16 Pisa tournaments.
+"""K16 Pisa v8 endpoint-aware CUDA witness search.
 
 This is a heuristic SAT witness hunter, not an UNSAT solver.  Every reported
 witness is independently rechecked by scripts.verify_witness.verify_masks.
+
+Unlike v7's 64 superficially similar zero-neighbour buckets, v8 assigns each
+walker campaign to one of the 54 genuinely different exact endpoint subboxes
+left by the v5/v6 map.  Directed 3-cycle reversals preserve the score sequence
+and now form a first-class move rather than an add-on after an edge flip.
 """
 
 from __future__ import annotations
@@ -24,6 +29,59 @@ from scripts.verify_witness import verify_masks
 N = 16
 PARTITION_BUCKETS = 32
 BASE_SEED = 0x4B31365049534137
+
+
+def endpoint_targets() -> list[dict]:
+    """The same 54 open structural targets used by exact GitHub v6."""
+    targets: list[dict] = []
+    d7_layers = {
+        14: range(9, 11),
+        15: range(9, 12),
+        16: range(8, 13),
+        17: range(8, 14),
+        18: range(8, 14),
+        19: range(8, 15),
+        20: range(8, 15),
+    }
+    for total_b, degrees in d7_layers.items():
+        for anchor_degree in degrees:
+            targets.append(
+                {
+                    "name": (
+                        f"d7_b1_B{'20plus' if total_b == 20 else total_b}_"
+                        f"anchorD{anchor_degree}"
+                    ),
+                    "degree": 7,
+                    "blockers": 1,
+                    "total_b": total_b,
+                    "total_b_is_floor": total_b == 20,
+                    "anchor_degree": anchor_degree,
+                    "pattern_ones": 0,
+                }
+            )
+    for anchor_degree in range(7, 14):
+        for pattern in ((0, 0), (0, 1), (1, 1)):
+            if not 0 <= anchor_degree - 7 - sum(pattern) <= 6:
+                continue
+            label = "".join(map(str, pattern))
+            targets.append(
+                {
+                    "name": (
+                        f"d6_b3_B20plus_anchorD{anchor_degree}_pattern{label}"
+                    ),
+                    "degree": 6,
+                    "blockers": 3,
+                    "total_b": 20,
+                    "total_b_is_floor": True,
+                    "anchor_degree": anchor_degree,
+                    "pattern_ones": sum(pattern),
+                }
+            )
+    assert len(targets) == 54
+    return targets
+
+
+ENDPOINT_TARGETS = endpoint_targets()
 
 
 def edge_data() -> tuple[list[tuple[int, int]], list[tuple[int, int]], list[int]]:
@@ -54,10 +112,16 @@ def colex_rank_from_positions(positions: tuple[int, ...] | list[int]) -> int:
     return sum(math.comb(position, index + 1) for index, position in enumerate(positions))
 
 
-def zero_patterns(target_degree: int, bucket: int) -> list[list[bool]]:
+def zero_patterns(
+    target_degree: int, bucket: int | None = None
+) -> list[list[bool]]:
     patterns: list[list[bool]] = []
     for positions in itertools.combinations(range(13), target_degree - 1):
-        if colex_rank_from_positions(positions) % PARTITION_BUCKETS != bucket:
+        if (
+            bucket is not None
+            and colex_rank_from_positions(positions) % PARTITION_BUCKETS
+            != bucket
+        ):
             continue
         row = [False] * 13
         for position in positions:
@@ -97,7 +161,7 @@ def partition_self_test() -> None:
 def initial_population(
     batch: int,
     target_degree: int,
-    bucket: int,
+    bucket: int | None,
     device: torch.device,
     generator: torch.Generator,
 ) -> torch.Tensor:
@@ -105,8 +169,9 @@ def initial_population(
         0, 2, (batch, len(FREE_EDGES)), device=device, dtype=torch.bool, generator=generator
     )
     # The fixed cycle contributes 0->1 and 15->0.  The remaining 13
-    # zero-neighbour choices are partitioned by colex rank modulo 32.  Mutations
-    # never touch these edges, so walkers cannot cross logical shards.
+    # zero-neighbour choices are sampled across the full role orbit. Mutations
+    # never touch these edges, but independent walkers cover every pattern;
+    # v8 shards are structural endpoint targets, not arbitrary colex buckets.
     pattern_values = zero_patterns(target_degree, bucket)
     pattern_tensor = torch.tensor(pattern_values, dtype=torch.bool, device=device)
     chosen = torch.randint(
@@ -132,7 +197,12 @@ def adjacency(bits: torch.Tensor) -> torch.Tensor:
 
 
 @torch.inference_mode()
-def evaluate(bits: torch.Tensor, target_degree: int, target_blockers: int) -> dict:
+def evaluate(
+    bits: torch.Tensor,
+    target_degree: int,
+    target_blockers: int,
+    endpoint: dict | None = None,
+) -> dict:
     adj = adjacency(bits)
     degree = adj.sum(dim=2, dtype=torch.int16)
     # All entries are <= 15, so fp16 matrix multiplication is exact here.
@@ -148,18 +218,52 @@ def evaluate(bits: torch.Tensor, target_degree: int, target_blockers: int) -> di
         (degree[:, 0] - target_degree).abs()
         + (blockers[:, 0] - target_blockers).abs()
     ).to(torch.int32)
-    loss = (
+    raw_loss = (
         100000 * branch_gap
         + 10000 * (positive > 0).sum(dim=1)
         + 200 * positive.sum(dim=1)
         + (positive * positive).sum(dim=1)
     )
+    total_b = blockers.sum(dim=1, dtype=torch.int32)
+    zero_blocker_mask = adj[:, :, 0] & ~paths[:, 0, :]
+    vertex_ids = torch.arange(N, device=bits.device).unsqueeze(0)
+    anchor_rank = (
+        degree.to(torch.int32) * 32 + vertex_ids
+    ).masked_fill(~zero_blocker_mask, 10000)
+    anchor = anchor_rank.argmin(dim=1)
+    rows = torch.arange(bits.shape[0], device=bits.device)
+    anchor_degree = degree[rows, anchor].to(torch.int32)
+    pattern_ones = (
+        adj[rows, anchor, :] & zero_blocker_mask
+    ).sum(dim=1, dtype=torch.int32)
+
+    endpoint_gap = torch.zeros(
+        bits.shape[0], dtype=torch.int32, device=bits.device
+    )
+    if endpoint is not None:
+        if endpoint["total_b_is_floor"]:
+            total_gap = torch.clamp(endpoint["total_b"] - total_b, min=0)
+        else:
+            total_gap = (total_b - endpoint["total_b"]).abs()
+        endpoint_gap = (
+            8 * total_gap
+            + 3 * (anchor_degree - endpoint["anchor_degree"]).abs()
+            + (pattern_ones - endpoint["pattern_ones"]).abs()
+        )
+    # Feasibility remains primary, but endpoint distance breaks the v7 10201
+    # plateau and steers independent shards toward genuinely different strata.
+    loss = raw_loss.to(torch.int64) * 1000 + endpoint_gap.to(torch.int64)
     incoming = adj.transpose(1, 2)
     positive_defect = incoming & (path_counts > 0)
     defect_values = path_counts.to(torch.int16).masked_fill(~positive_defect, N)
     extra_defect = defect_values.min(dim=2).values
     return {
         "loss": loss,
+        "raw_loss": raw_loss,
+        "endpoint_gap": endpoint_gap,
+        "total_b": total_b,
+        "zero_anchor_degree": anchor_degree,
+        "zero_anchor_pattern_ones": pattern_ones,
         "degree": degree,
         "second": second,
         "margin": margin,
@@ -191,25 +295,38 @@ def dynamic_score(metrics: dict, weights: torch.Tensor) -> torch.Tensor:
             + (metrics["blockers"][:, 0].to(torch.int32) - metrics["target_blockers"]).abs()
         )
         + (weights.to(torch.int32) * vertex_cost * (positive > 0)).sum(dim=1)
+        + 2000 * metrics["endpoint_gap"].to(torch.int32)
     )
 
 
 def mutate_edges(
     parents: torch.Tensor, generator: torch.Generator, mixed: bool
 ) -> torch.Tensor:
+    """Mixture with genuine score-preserving triangle moves.
+
+    v7 always flipped an edge before trying a triangle, so it almost never
+    explored the fixed-score state graph.  Here 45% of walkers perform only a
+    directed 3-cycle reversal, 40% perform one edge flip, and 15% a wider
+    two-edge move.  Focused blocker repairs may still replace these proposals.
+    """
     children = parents.clone()
     device = children.device
     batch = children.shape[0]
     rows = torch.arange(batch, device=device)
     allowed = torch.tensor(NONZERO_FREE_INDICES, device=device)
 
+    mode = torch.rand(batch, device=device, generator=generator)
+    edge_rows = rows[mode >= 0.45]
     edge_positions = torch.randint(
-        0, len(NONZERO_FREE_INDICES), (batch,), device=device, generator=generator
+        0,
+        len(NONZERO_FREE_INDICES),
+        (edge_rows.numel(),),
+        device=device,
+        generator=generator,
     )
-    children[rows, allowed[edge_positions]] ^= True
+    children[edge_rows, allowed[edge_positions]] ^= True
 
-    # Some walkers get a second edge flip to cross wider local barriers.
-    second_rows = rows[torch.rand(batch, device=device, generator=generator) < 0.20]
+    second_rows = rows[mode >= 0.85]
     if second_rows.numel():
         second_positions = torch.randint(
             0,
@@ -221,7 +338,7 @@ def mutate_edges(
         children[second_rows, allowed[second_positions]] ^= True
 
     if mixed:
-        tri_rows = rows[torch.rand(batch, device=device, generator=generator) < 0.55]
+        tri_rows = rows[mode < 0.45]
         if tri_rows.numel():
             triples = torch.tensor(FREE_TRIANGLES, device=device)
             picked = triples[
@@ -362,6 +479,7 @@ def exact_local_repair(
     target_degree: int,
     target_blockers: int,
     device: torch.device,
+    endpoint: dict | None = None,
     chunk_size: int = 4096,
 ) -> tuple[torch.Tensor, int, int, int, bool]:
     """Exhaust radius <= 6 in a 20-edge offender/blocker kernel on the GPU."""
@@ -370,17 +488,14 @@ def exact_local_repair(
     offenders = [
         v for v, margin in enumerate(check["margins"]) if margin > 0
     ]
-    current_loss = (
-        100000
-        * (
-            abs(check["outdegrees"][0] - target_degree)
-            + abs(check["blockers"][0] - target_blockers)
-        )
-        + 10000 * len(offenders)
-        + 200 * sum(max(0, m) for m in check["margins"])
-        + sum(max(0, m) ** 2 for m in check["margins"])
+    current_metrics = evaluate(
+        best_bits.unsqueeze(0),
+        target_degree,
+        target_blockers,
+        endpoint,
     )
-    current_defect = check["positive_defect_sum"]
+    current_loss = int(current_metrics["loss"][0])
+    current_defect = int(current_metrics["positive_defect_sum"][0])
     if len(offenders) != 1 or check["margins"][offenders[0]] != 1:
         return best_bits, current_loss, current_defect, 0, False
     offender = offenders[0]
@@ -447,7 +562,9 @@ def exact_local_repair(
                 torch.tensor(flip_rows, device=device),
                 torch.tensor(flip_cols, device=device),
             ] ^= True
-            metrics = evaluate(candidates, target_degree, target_blockers)
+            metrics = evaluate(
+                candidates, target_degree, target_blockers, endpoint
+            )
             checked += len(part)
             order = torch.argsort(
                 metrics["loss"].to(torch.int64) * 100
@@ -461,7 +578,7 @@ def exact_local_repair(
             if key < best_key:
                 best_key = key
                 best = candidates[index].clone()
-            witness_rows = torch.nonzero(metrics["loss"] == 0).flatten()
+            witness_rows = torch.nonzero(metrics["raw_loss"] == 0).flatten()
             if witness_rows.numel():
                 witness = candidates[int(witness_rows[0])].clone()
                 independent = verify_masks(bits_to_masks(witness))
@@ -484,28 +601,26 @@ def save_record(
     repair_states: int,
     target_degree: int,
     target_blockers: int,
-    bucket: int,
+    bucket: int | None,
+    endpoint: dict,
 ) -> dict:
     masks = bits_to_masks(best_bits)
     check = verify_masks(masks)
     subset, rank, actual_bucket = zero_partition_from_masks(masks)
-    partition_valid = (
-        actual_bucket == bucket
-        and check["outdegrees"][0] == target_degree
-    )
+    partition_valid = check["outdegrees"][0] == target_degree
     valid_witness = (
         check["is_pisa"]
         and partition_valid
         and check["blockers"][0] == target_blockers
     )
     record = {
-        "campaign": "K16-PISA-v7-blocker-breakout-repair",
+        "campaign": "K16-PISA-v8-endpoint-aware-triangle-search",
         "platform": "kaggle-gpu",
         "status": "WITNESS" if valid_witness else "NO_WITNESS",
         "shard": shard,
         "strategy": strategy,
-        "partition_scheme": "zero-out-neighbour-colex-rank-mod-32",
-        "partition_bucket": bucket,
+        "partition_scheme": "full-zero-out-neighbour-orbit-per-endpoint",
+        "partition_bucket": "all" if bucket is None else bucket,
         "partition_bucket_count": PARTITION_BUCKETS,
         "partition_pattern_count": len(zero_patterns(target_degree, bucket)),
         "zero_out_subset": subset,
@@ -513,6 +628,7 @@ def save_record(
         "partition_valid": partition_valid,
         "target_degree": target_degree,
         "target_blockers": target_blockers,
+        "target_endpoint": endpoint,
         "wall_seconds": round(seconds, 3),
         "generations": generations,
         "states_evaluated": candidates,
@@ -540,14 +656,13 @@ def run_shard(
     device: torch.device,
     output: Path,
 ) -> dict:
-    if shard < 0 or shard >= 64:
-        raise ValueError("shard must be in [0, 63]")
-    target_degree = 7 if shard < 32 else 6
-    target_blockers = 1 if target_degree == 7 else 3
-    bucket = shard % PARTITION_BUCKETS
-    strategy = (
-        f"d{target_degree}_b{target_blockers}_bucket_{bucket:02d}_blocker_breakout"
-    )
+    if shard < 0 or shard >= len(ENDPOINT_TARGETS):
+        raise ValueError(f"shard must be in [0, {len(ENDPOINT_TARGETS) - 1}]")
+    endpoint = ENDPOINT_TARGETS[shard]
+    target_degree = endpoint["degree"]
+    target_blockers = endpoint["blockers"]
+    bucket = None
+    strategy = f"{endpoint['name']}_full_orbit_triangle_endpoint"
     seed = (BASE_SEED ^ (shard << 32) ^ 0x475055) & ((1 << 63) - 1)
     torch.manual_seed(seed)
     random.seed(seed)
@@ -559,7 +674,9 @@ def run_shard(
     )
     data = mutation_data(device)
     weights = torch.ones((batch, N), dtype=torch.int16, device=device)
-    metrics = evaluate(population, target_degree, target_blockers)
+    metrics = evaluate(
+        population, target_degree, target_blockers, endpoint
+    )
     # evaluate() runs under inference_mode. Persistent population metrics are
     # updated in place, so detach them from inference storage first.
     metrics = {
@@ -583,14 +700,30 @@ def run_shard(
     repair_states = 0
     repair_seen: set[tuple[bool, ...]] = set()
 
-    while time.monotonic() - start < seconds and best_loss != 0:
+    witness_found = bool((metrics["raw_loss"] == 0).any())
+    if witness_found:
+        best_index = int(torch.nonzero(metrics["raw_loss"] == 0)[0])
+        best_bits = population[best_index].clone()
+    while time.monotonic() - start < seconds and not witness_found:
         children = focused_mutation(
             population, metrics, weights, generator, data
         )
-        child_metrics = evaluate(children, target_degree, target_blockers)
+        child_metrics = evaluate(
+            children, target_degree, target_blockers, endpoint
+        )
         child_losses = child_metrics["loss"]
         child_scores = dynamic_score(child_metrics, weights)
         candidates += batch
+        witness_rows = torch.nonzero(child_metrics["raw_loss"] == 0).flatten()
+        if witness_rows.numel():
+            candidate = children[int(witness_rows[0])].clone()
+            independent = verify_masks(bits_to_masks(candidate))
+            if independent["is_pisa"]:
+                best_bits = candidate
+                best_loss = 0
+                best_defect = 0
+                witness_found = True
+                break
 
         # Dynamic weighted local search: persistent walkers accept fine-score
         # improvements, with sparse noise for basin escape.
@@ -639,7 +772,8 @@ def run_shard(
         # Exact GPU local repair is invoked only on the true one-offender,
         # margin-one plateau. It checks all subsets up to radius six in the
         # offender/blocker kernel, rather than waiting for random mutations.
-        if best_loss == 10201:
+        best_raw_loss = int(metrics["raw_loss"][generation_best])
+        if best_raw_loss == 10201:
             signature = tuple(best_bits.detach().cpu().tolist())
             if signature not in repair_seen and len(repair_seen) < 64:
                 repair_seen.add(signature)
@@ -651,7 +785,11 @@ def run_shard(
                     checked,
                     found,
                 ) = exact_local_repair(
-                    best_bits, target_degree, target_blockers, device
+                    best_bits,
+                    target_degree,
+                    target_blockers,
+                    device,
+                    endpoint,
                 )
                 repair_states += checked
                 candidates += checked
@@ -665,6 +803,7 @@ def run_shard(
                         population[worst : worst + 1],
                         target_degree,
                         target_blockers,
+                        endpoint,
                     )
                     for key, value in metrics.items():
                         new_value = refreshed.get(key)
@@ -681,6 +820,7 @@ def run_shard(
                     )[0]
                 if found:
                     best_loss = 0
+                    witness_found = True
                     break
 
         # Maintain a broad elite source and periodically inject fresh random
@@ -699,7 +839,9 @@ def run_shard(
                 population[parents], generator, mixed=True
             )
             weights[worst] = weights[parents]
-            refreshed = evaluate(population[worst], target_degree, target_blockers)
+            refreshed = evaluate(
+                population[worst], target_degree, target_blockers, endpoint
+            )
             losses[worst] = refreshed["loss"]
             for key, value in metrics.items():
                 new_value = refreshed.get(key)
@@ -719,7 +861,9 @@ def run_shard(
                 fresh_count, target_degree, bucket, device, generator
             )
             weights[worst].fill_(1)
-            refreshed = evaluate(population[worst], target_degree, target_blockers)
+            refreshed = evaluate(
+                population[worst], target_degree, target_blockers, endpoint
+            )
             losses[worst] = refreshed["loss"]
             for key, value in metrics.items():
                 new_value = refreshed.get(key)
@@ -749,19 +893,20 @@ def run_shard(
         target_degree,
         target_blockers,
         bucket,
+        endpoint,
     )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--shard-start", type=int, default=0)
-    parser.add_argument("--shard-count", type=int, default=64)
+    parser.add_argument("--shard-count", type=int, default=54)
     parser.add_argument("--seconds-per-shard", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=16384)
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/kaggle/working/k16_gpu_results_v7"),
+        default=Path("/kaggle/working/k16_gpu_results_v8"),
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--allow-cpu", action="store_true")
@@ -769,10 +914,11 @@ def main() -> int:
 
     partition_self_test()
     print(
-        "PARTITION_GATE_PASS "
+        "V8_ENDPOINT_GATE_PASS "
+        f"distinct_endpoint_targets={len(ENDPOINT_TARGETS)} "
         f"d7_patterns={math.comb(13, 6)} "
         f"d6_patterns={math.comb(13, 5)} "
-        "buckets_per_branch=32",
+        "each_target_samples_full_zero_pattern_orbit=true",
         flush=True,
     )
 
@@ -808,7 +954,7 @@ def main() -> int:
         checkpoint.write_text(
             json.dumps(
                 {
-                    "campaign": "K16-PISA-v7-blocker-breakout-repair",
+                    "campaign": "K16-PISA-v8-endpoint-aware-triangle-search",
                     "completed_shards": sorted(completed),
                     "witness_found": result["status"] == "WITNESS",
                 },
