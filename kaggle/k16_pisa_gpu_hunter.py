@@ -560,6 +560,12 @@ def run_shard(
     data = mutation_data(device)
     weights = torch.ones((batch, N), dtype=torch.int16, device=device)
     metrics = evaluate(population, target_degree, target_blockers)
+    # evaluate() runs under inference_mode. Persistent population metrics are
+    # updated in place, so detach them from inference storage first.
+    metrics = {
+        key: value.clone() if isinstance(value, torch.Tensor) else value
+        for key, value in metrics.items()
+    }
     losses = metrics["loss"].clone()
     scores = dynamic_score(metrics, weights)
     initial_key = (
