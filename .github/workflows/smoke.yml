@@ -1,0 +1,103 @@
+name: K16 Pisa smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k16-pisa-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: Positive regression gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run all three positive gates
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python k16_pisa_solver.py --gates-only --smoke --output-dir results \
+            2>&1 | tee logs/gates.log
+      - name: Summarize gates
+        run: python scripts/result_summary.py results/k16_pisa_smoke_gates.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-gates
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 30
+
+  boxes:
+    name: Smoke ${{ matrix.box }}
+    needs: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 18
+      matrix:
+        box:
+          - d7_b1_eq10
+          - d7_b1_eq11
+          - d7_b1_ge12
+          - d6_b3_eq10
+          - d6_b3_eq11
+          - d6_b3_ge12
+          - d5_b5_eq10
+          - d5_b5_eq11
+          - d5_b5_ge12
+          - d4_b7_eq10
+          - d4_b7_eq11
+          - d4_b7_ge12
+          - d3_b9_eq10
+          - d3_b9_eq11
+          - d3_b9_ge12
+          - d2_b11_eq10
+          - d2_b11_eq11
+          - d2_b11_ge12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run five-second box smoke
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python k16_pisa_solver.py --box "${{ matrix.box }}" --smoke --output-dir results \
+            2>&1 | tee "logs/${{ matrix.box }}.log"
+      - name: Summarize box
+        if: always()
+        run: python scripts/result_summary.py "results/k16_pisa_smoke_${{ matrix.box }}.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload box evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.box }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 30
