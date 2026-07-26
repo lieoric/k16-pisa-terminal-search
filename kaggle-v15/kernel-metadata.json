@@ -7,9 +7,9 @@
   "is_private": true,
   "enable_gpu": false,
   "enable_internet": true,
-  "dataset_sources": [],
+  "dataset_sources": [
+    "chamine/k16-pisa-v14-cancelled-checkpoint"
+  ],
   "competition_sources": [],
-  "kernel_sources": [
-    "chamine/k16-pisa-v14-resumable-8h"
-  ]
+  "kernel_sources": []
 }
