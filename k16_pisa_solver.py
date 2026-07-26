@@ -722,6 +722,45 @@ def terminal_box_specs():
 TERMINAL_BOXES = terminal_box_specs()
 
 
+def residual_refinement_box_specs():
+    """Refine only the two hard residual terminal boxes.
+
+    For each remaining zero-point branch, the old total_b >= 12 box is
+    partitioned exactly into total_b = 12,...,19 and total_b >= 20.
+    The boxes are pairwise disjoint and their union is the original residual
+    box, so the refinement introduces neither gaps nor duplicated cases.
+    """
+    specs = {}
+    for degree, blockers in [(7, 1), (6, 3)]:
+        branch = f"d{degree}_b{blockers}"
+        for total_b in range(12, 20):
+            key = f"{branch}_eq{total_b}"
+            specs[key] = {
+                "name": f"REFINE_{branch}_sum_b_eq_{total_b}",
+                "degree": degree,
+                "blockers": blockers,
+                "total_b_eq": total_b,
+                "total_b_min": None,
+                "budget": "exact_layer",
+                "seeds": SEEDS[:1],
+            }
+        key = f"{branch}_ge20"
+        specs[key] = {
+            "name": f"REFINE_{branch}_sum_b_ge_20",
+            "degree": degree,
+            "blockers": blockers,
+            "total_b_eq": None,
+            "total_b_min": 20,
+            "budget": "residual_layer",
+            "seeds": SEEDS[:2],
+        }
+    return specs
+
+
+REFINEMENT_BOXES = residual_refinement_box_specs()
+ALL_BOXES = {**TERMINAL_BOXES, **REFINEMENT_BOXES}
+
+
 def build_terminal_box(spec):
     return TerminalTournamentModel(
         16,
@@ -734,11 +773,11 @@ def build_terminal_box(spec):
 
 
 def run_terminal(selected_box=None):
-    if selected_box is not None and selected_box not in TERMINAL_BOXES:
+    if selected_box is not None and selected_box not in ALL_BOXES:
         raise ValueError(f"unknown terminal box: {selected_box}")
 
     selected = (
-        [(selected_box, TERMINAL_BOXES[selected_box])]
+        [(selected_box, ALL_BOXES[selected_box])]
         if selected_box is not None
         else list(TERMINAL_BOXES.items())
     )
@@ -779,8 +818,11 @@ def parse_args():
     )
     target.add_argument(
         "--box",
-        choices=sorted(TERMINAL_BOXES),
-        help="Run one of the 18 independent terminal boxes after the gates.",
+        choices=sorted(ALL_BOXES),
+        help=(
+            "Run one original terminal box or one residual-refinement box "
+            "after the gates."
+        ),
     )
     parser.add_argument(
         "--smoke",
