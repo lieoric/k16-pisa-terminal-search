@@ -118,3 +118,29 @@ tournaments in parallel, writes one JSON per partition, and updates separate
 checkpoints under `/kaggle/working/k16_gpu_results_v7`. Download that directory
 before a Kaggle session expires. The notebook currently checks out branch
 `agent/witness-hunter`; change `REF` to `main` after the pull request is merged.
+
+## C16(1,7,8) carrier-completion campaign
+
+The workflow `C16(1,7,8) carrier completion 11-box matrix` tests a separate
+structure-led construction.  The sparse carrier is the ordered-pair blow-up of
+a directed 8-cycle:
+
+- pair `i` dominates pair `i-1` modulo 8;
+- inside each pair, the high vertex dominates the low vertex;
+- its underlying graph is exactly `C16(1,7,8)`;
+- its degree profile is `2^8 3^8` and its margin profile is `0^8 (-1)^8`.
+
+Module rotation leaves the carrier orientation fixed.  Therefore a zero-margin
+vertex in any tournament completion can be moved to one of only two orbit
+representatives.  The exact matrix covers:
+
+```text
+low orbit:  d = 2,3,4,5,6,7
+high orbit: d =   3,4,5,6,7
+```
+
+These eleven boxes cover every completion of this fixed canonical carrier
+orientation. `SAT` is an independently checked, unconditional K16 Pisa
+witness. `UNSAT` closes the named completion box; all eleven `UNSAT` results
+close this carrier-completion construction but do not prove that arbitrary K16
+tournaments are impossible.

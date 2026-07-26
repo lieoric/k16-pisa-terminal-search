@@ -1,0 +1,68 @@
+name: C16(1,7,8) carrier completion smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "agent/**"
+    paths:
+      - "scripts/circulant_completion.py"
+      - "k16_pisa_solver.py"
+      - ".github/workflows/circulant-completion-*.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: c16-1-7-8-completion-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  carrier-gate:
+    name: Verify C16(1,7,8) Pisa carrier
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - run: python scripts/circulant_completion.py --gate-only
+
+  sample-boxes:
+    name: Smoke ${{ matrix.box }}
+    needs: carrier-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        box: [low_d7_b1, high_d7_b1]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run ten-second completion smoke
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results
+          python scripts/circulant_completion.py \
+            --box "${{ matrix.box }}" \
+            --seconds 10 \
+            --workers 4 \
+            --output "results/${{ matrix.box }}.json" \
+            2>&1 | tee "results/${{ matrix.box }}.log"
+      - name: Upload smoke record
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: circulant-smoke-${{ matrix.box }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 30
