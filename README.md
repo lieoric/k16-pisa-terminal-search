@@ -319,3 +319,15 @@ hybrid K16 formulas, obtains complete SMS partitions at cutoffs
 partition for 30 seconds each.  `SAT` is accepted only after the standalone
 bit-mask verifier succeeds; timeout is recorded as `UNKNOWN`.  Results are
 written to `/kaggle/working/k16-v12-results/v12-hybrid-summary.json`.
+
+Kaggle version
+[`338154164`](https://www.kaggle.com/code/chamine/k16-pisa-v12-hybrid-sms-endpoint?scriptVersionId=338154164)
+completed in about 9.2 minutes.  All four gates passed.  The complete
+partitions contained 476, 1023, 4194, 9634, and 9788 cubes respectively.  In
+particular the endpoint closures reduced the cutoff-32 partition from the v11
+count of 835 cubes to 476.  Cutoff 64 performed best in the short sample:
+two of eight cubes were `UNSAT` in 0.654 and 3.968 seconds, while six timed
+out after 30 seconds.  This selects cutoff 64 for adaptive refinement, but it
+is not a K16 decision; every sampled `UNKNOWN` region remains open.  The
+machine-readable transcription is
+`evidence/v12-kaggle-338154164.json`.
