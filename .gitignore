@@ -3,3 +3,5 @@ __pycache__/
 .venv/
 results/
 logs/
+work_test/
+work_k16_witness_cpu*
