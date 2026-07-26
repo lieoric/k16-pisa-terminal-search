@@ -374,3 +374,23 @@ seconds.  Of the 384 exact children, 85 were `UNSAT` and 299 remained
 parents retained all 64 children at the 12-second budget.  No complete parent
 closed, so this remains a refinement result rather than a K16 decision.  The
 machine-readable transcription is `evidence/v13-kaggle-338156810.json`.
+
+## v14 resumable 8-hour refinement
+
+v14 reads the exact list of the 299 v13 `UNKNOWN` children and never repeats
+the 85 v13 closures. GitHub Actions and Kaggle receive disjoint halves of
+those residual roots. Each root is first refined on three additional free
+unordered tournament edges.
+
+When a leaf reaches its time limit, v14 replaces it by the two exhaustive
+children on another free edge instead of retrying the same opaque timeout.
+The checkpoint contains the pending disjoint queue and every proved UNSAT
+leaf. A resumed session may lose solver-local learned clauses, but it does
+not lose mathematical coverage. `CHECKPOINTED` remains open; only a verified
+`SAT` witness or an empty queue is terminal.
+
+GitHub-hosted jobs have a six-hour limit, so
+`.github/workflows/v14-resumable-8h.yml` uses a 5h08m first stage and a
+2h46m continuation stage for each of eight parallel shards. The complementary
+Kaggle half is in `kaggle/k16_pisa_v14_resumable_8h.ipynb`; it leaves
+`kaggle-v14-checkpoint.json` in notebook output for a later continuation run.

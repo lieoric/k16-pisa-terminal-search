@@ -1,0 +1,360 @@
+name: K16 Pisa v14 resumable 8-hour campaign
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - campaign/c16-circulant-completion
+    paths:
+      - ".github/workflows/v14-resumable-8h.yml"
+      - "campaigns/v14-kaggle-338156810-residuals.json"
+      - "pisa_verify.py"
+      - "requirements-sat.txt"
+      - "scripts/pisa_sat_v11.py"
+      - "scripts/resumable_refinement_v14.py"
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  SMS_COMMIT: 464f12f1fd36b496e7ba9dcbb622b079de02dce4
+
+jobs:
+  prepare:
+    name: Prepare exact residual partition
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install exact-search dependencies
+        run: |
+          python -m pip install -r requirements-sat.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake libboost-graph-dev libboost-program-options-dev
+      - name: Build pinned SAT Modulo Symmetries
+        run: |
+          git clone --recursive https://github.com/markirch/sat-modulo-symmetries.git tools/sms
+          git -C tools/sms checkout "$SMS_COMMIT"
+          git -C tools/sms submodule update --init --recursive
+          (
+            cd tools/sms/cadical_sms
+            ./configure -fPIC
+            make -j4
+          )
+          cmake -S tools/sms -B tools/sms/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build tools/sms/build -j4
+      - name: Rebuild the certified v12 formula and cutoff-64 partition
+        run: |
+          mkdir -p prepared
+          python scripts/pisa_sat_v11.py \
+            --n 16 \
+            --min-total-blockers 16 \
+            --endpoint-closures \
+            --cnf prepared/k16-v12-hybrid.cnf \
+            --metadata prepared/k16-v12-hybrid.json
+          set +e
+          tools/sms/build/src/smsg \
+            --vertices 16 \
+            --directed \
+            --dimacs prepared/k16-v12-hybrid.cnf \
+            --simple-assignment-cutoff 64 \
+            --timeout 180 \
+            > prepared/cutoff-64.log
+          sms_status=$?
+          set -e
+          test "$sms_status" -eq 20
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          log = Path("prepared/cutoff-64.log").read_text()
+          cubes = [
+              line.strip().lstrip("\ufeff")
+              for line in log.splitlines()
+              if line.strip().lstrip("\ufeff").startswith("a ")
+              and line.strip().endswith(" 0")
+          ]
+          assert "Result: 20" in log, "SMS partition did not complete"
+          assert len(cubes) == 9788, len(cubes)
+          Path("prepared/cutoff-64.cubes").write_text(
+              "\n".join(cubes) + "\n"
+          )
+          manifest = json.loads(
+              Path(
+                  "campaigns/v14-kaggle-338156810-residuals.json"
+              ).read_text()
+          )
+          assert manifest["source"]["unknown_children"] == 299
+          print("PREPARED exact_cubes=9788 residual_roots=299")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v14-prepared-cutoff64
+          path: |
+            prepared/k16-v12-hybrid.cnf
+            prepared/k16-v12-hybrid.json
+            prepared/cutoff-64.cubes
+          retention-days: 10
+
+  smoke:
+    name: Resume and witness gates
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v14-prepared-cutoff64
+          path: prepared
+      - name: Positive witness gate
+        run: |
+          mkdir -p smoke
+          python scripts/pisa_sat_v11.py \
+            --n 5 \
+            --cnf smoke/k5.cnf \
+            --metadata smoke/k5.json
+          printf 'a 0\n' > smoke/root.cubes
+          printf '{"source":{"unknown_children":1},"unknown_by_parent":{"1":[0]}}\n' \
+            > smoke/manifest.json
+          python scripts/resumable_refinement_v14.py \
+            --cnf smoke/k5.cnf \
+            --cube-file smoke/root.cubes \
+            --manifest smoke/manifest.json \
+            --checkpoint smoke/k5-checkpoint.json \
+            --output smoke/k5-summary.json \
+            --n 5 \
+            --source-split-depth 1 \
+            --pre-split-depth 1 \
+            --slice-seconds 2 \
+            --wall-seconds 40 \
+            --workers 2
+          python - <<'PY'
+          import json
+          record = json.load(open("smoke/k5-summary.json"))
+          assert record["status"] == "SAT", record
+          assert record["found"]["result"]["verified"] is True
+          print("POSITIVE_GATE verified")
+          PY
+      - name: Exact residual and checkpoint-resume gate
+        run: |
+          mkdir -p smoke/residual
+          common_args=(
+            --cnf prepared/k16-v12-hybrid.cnf
+            --cube-file prepared/cutoff-64.cubes
+            --manifest campaigns/v14-kaggle-338156810-residuals.json
+            --checkpoint smoke/residual/checkpoint.json
+            --output smoke/residual/summary.json
+            --partition-count 2
+            --partition-index 0
+            --shard-count 8
+            --shard-index 0
+            --pre-split-depth 2
+            --slice-seconds 5
+            --wall-seconds 70
+            --workers 4
+          )
+          python scripts/resumable_refinement_v14.py "${common_args[@]}"
+          python scripts/resumable_refinement_v14.py "${common_args[@]}"
+          python - <<'PY'
+          import json
+          checkpoint = json.load(open("smoke/residual/checkpoint.json"))
+          assert checkpoint["stats"]["sessions"] == 2, checkpoint["stats"]
+          assert checkpoint["stats"]["errors"] == 0, checkpoint["errors"]
+          assert checkpoint["progress"]["selected_root_count"] > 0
+          print(
+              "RESUME_GATE",
+              checkpoint["progress"],
+              checkpoint["stats"],
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-smoke-checkpoints
+          path: smoke/
+          retention-days: 10
+
+  stage1:
+    name: Long stage 1 / shard ${{ matrix.shard }}
+    needs: [prepare, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 335
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v14-prepared-cutoff64
+          path: prepared
+      - name: Refine this exact disjoint shard for 5h08m
+        run: |
+          mkdir -p "results/shard-${{ matrix.shard }}"
+          python scripts/resumable_refinement_v14.py \
+            --cnf prepared/k16-v12-hybrid.cnf \
+            --cube-file prepared/cutoff-64.cubes \
+            --manifest campaigns/v14-kaggle-338156810-residuals.json \
+            --checkpoint "results/shard-${{ matrix.shard }}/checkpoint.json" \
+            --output "results/shard-${{ matrix.shard }}/summary.json" \
+            --partition-count 2 \
+            --partition-index 0 \
+            --shard-count 8 \
+            --shard-index "${{ matrix.shard }}" \
+            --pre-split-depth 3 \
+            --slice-seconds 180 \
+            --wall-seconds 18500 \
+            --workers 4
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-stage1-shard-${{ matrix.shard }}
+          path: results/shard-${{ matrix.shard }}/
+          retention-days: 30
+
+  stage2:
+    name: Long stage 2 / shard ${{ matrix.shard }}
+    needs: [prepare, smoke, stage1]
+    runs-on: ubuntu-latest
+    timeout-minutes: 190
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v14-prepared-cutoff64
+          path: prepared
+      - uses: actions/download-artifact@v4
+        with:
+          name: v14-stage1-shard-${{ matrix.shard }}
+          path: results/shard-${{ matrix.shard }}
+      - name: Resume the same shard for another 2h46m
+        run: |
+          python scripts/resumable_refinement_v14.py \
+            --cnf prepared/k16-v12-hybrid.cnf \
+            --cube-file prepared/cutoff-64.cubes \
+            --manifest campaigns/v14-kaggle-338156810-residuals.json \
+            --checkpoint "results/shard-${{ matrix.shard }}/checkpoint.json" \
+            --output "results/shard-${{ matrix.shard }}/summary.json" \
+            --partition-count 2 \
+            --partition-index 0 \
+            --shard-count 8 \
+            --shard-index "${{ matrix.shard }}" \
+            --pre-split-depth 3 \
+            --slice-seconds 180 \
+            --wall-seconds 10000 \
+            --workers 4
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-final-shard-${{ matrix.shard }}
+          path: results/shard-${{ matrix.shard }}/
+          retention-days: 30
+
+  aggregate:
+    name: Aggregate resumable frontier
+    needs: stage2
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v14-final-shard-*
+          path: final
+      - name: Aggregate status without overstating UNKNOWN
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          summaries = [
+              json.loads(path.read_text())
+              for path in sorted(Path("final").rglob("summary.json"))
+          ]
+          result = {
+              "model_version": (
+                  "k16-pisa-v14-github-resumable-8h-20260727"
+              ),
+              "shards_expected": 8,
+              "shards_returned": len(summaries),
+              "sat_shards": [
+                  index
+                  for index, summary in enumerate(summaries)
+                  if summary["status"] == "SAT"
+              ],
+              "closed_shards": sum(
+                  summary["status"] == "CLOSED"
+                  for summary in summaries
+              ),
+              "checkpointed_shards": sum(
+                  summary["status"] == "CHECKPOINTED"
+                  for summary in summaries
+              ),
+              "selected_roots": sum(
+                  summary["progress"]["selected_root_count"]
+                  for summary in summaries
+              ),
+              "roots_closed": sum(
+                  summary["progress"]["roots_closed"]
+                  for summary in summaries
+              ),
+              "pending_leaves": sum(
+                  summary["progress"]["pending_leaves"]
+                  for summary in summaries
+              ),
+              "unsat_leaves": sum(
+                  summary["progress"]["closed_unsat_leaves"]
+                  for summary in summaries
+              ),
+              "attempts": sum(
+                  summary["stats"]["attempts"]
+                  for summary in summaries
+              ),
+              "errors": sum(
+                  summary["stats"]["errors"]
+                  for summary in summaries
+              ),
+              "note": (
+                  "A checkpointed shard remains mathematically open. "
+                  "Its artifact can be resumed without retrying proved "
+                  "UNSAT leaves."
+              ),
+              "shards": summaries,
+          }
+          Path("v14-github-8h-summary.json").write_text(
+              json.dumps(result, indent=2) + "\n"
+          )
+          print(json.dumps(result, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v14-github-8h-summary
+          path: v14-github-8h-summary.json
+          retention-days: 30
