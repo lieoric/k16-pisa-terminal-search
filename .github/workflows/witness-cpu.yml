@@ -11,6 +11,9 @@ on:
         description: CPU threads used by each shard
         required: true
         default: "4"
+  push:
+    branches:
+      - "campaign/k16-witness-v5"
 
 permissions:
   contents: read
@@ -95,7 +98,7 @@ jobs:
           - 62
           - 63
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build native hunter
         run: g++ -std=c++17 -O3 -march=x86-64 -DNDEBUG -pthread src/k16_witness_cpu.cpp -o k16_witness_cpu
       - name: Run independent witness shard
@@ -105,8 +108,8 @@ jobs:
           mkdir -p "results/shard-${{ matrix.shard }}"
           ./k16_witness_cpu \
             --shard "${{ matrix.shard }}" \
-            --seconds "${{ inputs.seconds_per_shard }}" \
-            --threads "${{ inputs.threads_per_shard }}" \
+            --seconds "${{ inputs.seconds_per_shard || '3600' }}" \
+            --threads "${{ inputs.threads_per_shard || '4' }}" \
             --output "results/shard-${{ matrix.shard }}/result.json" \
             2>&1 | tee "results/shard-${{ matrix.shard }}/run.log"
       - name: Independently verify declared status
@@ -134,7 +137,7 @@ jobs:
           PY
       - name: Upload JSON, verification and log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: witness-cpu-shard-${{ matrix.shard }}
           path: results/shard-${{ matrix.shard }}/
@@ -148,8 +151,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
         with:
           pattern: witness-cpu-shard-*
           path: downloaded-results
@@ -161,7 +164,7 @@ jobs:
             --output summary/witness-summary.json | tee summary/summary.md
           cat summary/summary.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload campaign summary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: witness-cpu-summary
           path: summary/
