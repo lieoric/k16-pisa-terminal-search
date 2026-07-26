@@ -337,6 +337,7 @@ class TerminalTournamentModel:
         strongness_mode="score",
         anchor_refinement=None,
         invariant_role_sort=False,
+        role_symmetry_break=True,
     ):
         self.n = n
         self.model = cp_model.CpModel()
@@ -531,12 +532,16 @@ class TerminalTournamentModel:
                     anchor_losses,
                 ]
 
-            for group in symmetry_groups:
-                if invariant_role_sort:
-                    self._add_invariant_role_sort(group)
-                else:
-                    for i in range(len(group) - 1):
-                        m.Add(self.degree[group[i]] <= self.degree[group[i + 1]])
+            if role_symmetry_break:
+                for group in symmetry_groups:
+                    if invariant_role_sort:
+                        self._add_invariant_role_sort(group)
+                    else:
+                        for i in range(len(group) - 1):
+                            m.Add(
+                                self.degree[group[i]]
+                                <= self.degree[group[i + 1]]
+                            )
 
         if strongness_mode == "score":
             # Strongness from a sorted score sequence. p is a permutation of
