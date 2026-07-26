@@ -54,7 +54,7 @@ jobs:
           mkdir -p "results/${{ matrix.box }}"
           python scripts/circulant_completion.py \
             --box "${{ matrix.box }}" \
-            --seconds "${{ inputs.seconds_per_box }}" \
+            --seconds "${{ inputs.seconds_per_box || '1800' }}" \
             --workers 4 \
             --output "results/${{ matrix.box }}/result.json" \
             2>&1 | tee "results/${{ matrix.box }}/run.log"
