@@ -1,0 +1,13 @@
+{
+  "id": "chamine/k16-pisa-v14-resumable-8h",
+  "title": "K16 Pisa v14 Resumable 8h",
+  "code_file": "k16_pisa_v14_resumable_8h.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}
