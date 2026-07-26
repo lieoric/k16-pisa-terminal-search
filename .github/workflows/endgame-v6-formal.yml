@@ -11,6 +11,11 @@ on:
         description: Continuous solver budget for each orbit-split d6/b3 box
         required: true
         default: "1800"
+  push:
+    branches:
+      - "agent/k16-endpoint-endgame"
+    paths:
+      - ".github/workflows/endgame-v6-formal.yml"
 
 permissions:
   contents: read
