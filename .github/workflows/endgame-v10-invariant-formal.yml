@@ -7,6 +7,11 @@ on:
         description: Continuous solver budget for each invariant box
         required: true
         default: "3600"
+  push:
+    branches:
+      - "agent/k16-endpoint-endgame"
+    paths:
+      - ".github/v10-invariant-formal-launch"
 
 permissions:
   contents: read
