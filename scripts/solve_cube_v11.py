@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from k16_pisa_solver import verify
+from pisa_verify import verify
 
 
 def arc_var(n: int, u: int, v: int) -> int:
@@ -52,6 +52,10 @@ def main() -> None:
     parser.add_argument("--cube-line", type=int, required=True)
     parser.add_argument("--n", type=int, default=16)
     parser.add_argument("--solver", default="cadical195")
+    parser.add_argument(
+        "--model-version",
+        default="k16-pisa-v11-canonical-cube-cadical-20260727",
+    )
     parser.add_argument("--result", type=Path, required=True)
     args = parser.parse_args()
 
@@ -61,7 +65,7 @@ def main() -> None:
     with Solver(name=args.solver, bootstrap_with=formula.clauses) as solver:
         sat = solver.solve(assumptions=assumptions)
         record: dict[str, object] = {
-            "model_version": "k16-pisa-v11-canonical-cube-cadical-20260727",
+            "model_version": args.model_version,
             "status": "SAT" if sat else "UNSAT",
             "solver": args.solver,
             "seconds": round(time.perf_counter() - started, 3),

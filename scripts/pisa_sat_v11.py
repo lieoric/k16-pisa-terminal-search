@@ -28,10 +28,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from k16_pisa_solver import verify
+from pisa_verify import verify
 
 
-MODEL_VERSION = "k16-pisa-v11-symmetry-safe-sat-pb-20260727"
+BASE_MODEL_VERSION = "k16-pisa-v11-symmetry-safe-sat-pb-20260727"
+HYBRID_MODEL_VERSION = "k16-pisa-v12-symmetry-endpoint-hybrid-20260727"
+
+
+def model_version(endpoint_closures: bool) -> str:
+    return HYBRID_MODEL_VERSION if endpoint_closures else BASE_MODEL_VERSION
 
 
 class NamedPool:
@@ -106,6 +111,7 @@ def add_cardinality(
 class CNFEncoding:
     n: int
     min_total_blockers: int
+    endpoint_closures: bool
     cnf: CNF
     pool: NamedPool
     cycle: dict[tuple[int, int, int, int], int]
@@ -114,13 +120,14 @@ class CNFEncoding:
 
     def metadata(self) -> dict:
         return {
-            "model_version": MODEL_VERSION,
+            "model_version": model_version(self.endpoint_closures),
             "format": "DIMACS CNF",
             "n": self.n,
             "variables": max(self.cnf.nv, self.pool.top),
             "clauses": len(self.cnf.clauses),
             "arc_variables": self.n * (self.n - 1),
             "min_total_blockers": self.min_total_blockers,
+            "endpoint_closures": self.endpoint_closures,
             "symmetry": (
                 "The formula is invariant under every permutation of the "
                 "n tournament vertices; no feed vertex is labelled."
@@ -129,11 +136,17 @@ class CNFEncoding:
         }
 
 
-def build_cnf(n: int, min_total_blockers: int = 0) -> CNFEncoding:
+def build_cnf(
+    n: int,
+    min_total_blockers: int = 0,
+    endpoint_closures: bool = False,
+) -> CNFEncoding:
     if n < 3:
         raise ValueError("n must be at least 3")
     if not 0 <= min_total_blockers <= n * (n - 1):
         raise ValueError("bad blocker lower bound")
+    if endpoint_closures and n != 16:
+        raise ValueError("endpoint closures are certified only for n=16")
 
     named = NamedPool(n)
     cnf = CNF()
@@ -250,6 +263,88 @@ def build_cnf(n: int, min_total_blockers: int = 0) -> CNFEncoding:
             kind="atleast",
         )
 
+    # Exact v5/v6 closure, expressed without choosing a labelled feed
+    # vertex.  After the already certified endpoint layers are removed,
+    # every remaining K16 witness has a zero-margin endpoint of one of:
+    #
+    #   d+(v)=7, b(v)=1 and total blockers B>=16; or
+    #   d+(v)=6, b(v)=3 and total blockers B>=20.
+    #
+    # The zero-margin equation already forces b=15-2d, so only the degree
+    # needs to be reified here.  The existential choice is symmetric over
+    # all 16 vertices and is therefore safe for SMS canonical partitioning.
+    if endpoint_closures:
+        all_blockers = list(blocker.values())
+        if min_total_blockers < 16:
+            add_cardinality(
+                cnf,
+                named,
+                all_blockers,
+                bound=16,
+                kind="atleast",
+            )
+
+        branch_d7 = named.new("endpoint_branch_degree_7")
+        branch_d6 = named.new("endpoint_branch_degree_6")
+        cnf.append([branch_d7, branch_d6])
+        cnf.append([-branch_d7, -branch_d6])
+
+        selectors_d7 = []
+        selectors_d6 = []
+        for v in range(n):
+            outgoing = [arc[(v, u)] for u in range(n) if u != v]
+            select_d7 = named.new(f"endpoint_degree_7_vertex_{v}")
+            select_d6 = named.new(f"endpoint_degree_6_vertex_{v}")
+            selectors_d7.append(select_d7)
+            selectors_d6.append(select_d6)
+
+            cnf.append([-select_d7, branch_d7])
+            cnf.append([-select_d6, branch_d6])
+            cnf.append([-select_d7, zero[v]])
+            cnf.append([-select_d6, zero[v]])
+            for selector, degree in (
+                (select_d7, 7),
+                (select_d6, 6),
+            ):
+                add_cardinality(
+                    cnf,
+                    named,
+                    outgoing,
+                    bound=degree,
+                    kind="atleast",
+                    guard=selector,
+                )
+                add_cardinality(
+                    cnf,
+                    named,
+                    outgoing,
+                    bound=degree,
+                    kind="atmost",
+                    guard=selector,
+                )
+
+        cnf.append([-branch_d7] + selectors_d7)
+        cnf.append([-branch_d6] + selectors_d6)
+        selectors = selectors_d7 + selectors_d6
+        cnf.append(selectors)
+        add_cardinality(
+            cnf,
+            named,
+            selectors,
+            bound=1,
+            kind="atmost",
+        )
+
+        # Only the degree-6 residual needs the stronger B>=20 closure.
+        add_cardinality(
+            cnf,
+            named,
+            all_blockers,
+            bound=20,
+            kind="atleast",
+            guard=branch_d6,
+        )
+
     # Exact strong connectivity with no distinguished root.  Every proper
     # cut must contain an arc in each direction.  Complementary cuts are
     # generated only once by requiring vertex 0 to stay outside S.
@@ -278,6 +373,7 @@ def build_cnf(n: int, min_total_blockers: int = 0) -> CNFEncoding:
     return CNFEncoding(
         n=n,
         min_total_blockers=min_total_blockers,
+        endpoint_closures=endpoint_closures,
         cnf=cnf,
         pool=named,
         cycle=cycle,
@@ -343,6 +439,7 @@ class OPBBuilder:
 class OPBEncoding:
     n: int
     min_total_blockers: int
+    endpoint_closures: bool
     builder: OPBBuilder
     arcs: dict[tuple[int, int], int]
     blocker: dict[tuple[int, int], int]
@@ -350,17 +447,29 @@ class OPBEncoding:
 
     def metadata(self) -> dict:
         return {
-            "model_version": MODEL_VERSION,
+            "model_version": model_version(self.endpoint_closures),
             "format": "OPB",
             "n": self.n,
             "variables": self.builder.variables,
             "constraints": len(self.builder.constraints),
             "arc_variables": self.n * (self.n - 1),
             "min_total_blockers": self.min_total_blockers,
+            "endpoint_closures": self.endpoint_closures,
         }
 
 
-def build_opb(n: int, min_total_blockers: int = 0) -> OPBEncoding:
+def build_opb(
+    n: int,
+    min_total_blockers: int = 0,
+    endpoint_closures: bool = False,
+) -> OPBEncoding:
+    if n < 3:
+        raise ValueError("n must be at least 3")
+    if not 0 <= min_total_blockers <= n * (n - 1):
+        raise ValueError("bad blocker lower bound")
+    if endpoint_closures and n != 16:
+        raise ValueError("endpoint closures are certified only for n=16")
+
     opb = OPBBuilder()
     arc: dict[tuple[int, int], int] = {}
     for u in range(n):
@@ -453,6 +562,60 @@ def build_opb(n: int, min_total_blockers: int = 0) -> OPBEncoding:
             min_total_blockers,
         )
 
+    if endpoint_closures:
+        all_blockers = [(1, q) for q in blocker.values()]
+        if min_total_blockers < 16:
+            opb.add(all_blockers, ">=", 16)
+
+        branch_d7 = opb.new("endpoint_branch_degree_7")
+        branch_d6 = opb.new("endpoint_branch_degree_6")
+        opb.add([(1, branch_d7), (1, branch_d6)], "=", 1)
+
+        selectors_d7 = []
+        selectors_d6 = []
+        all_selectors = []
+        for v in range(n):
+            outgoing = [arc[(v, u)] for u in range(n) if u != v]
+            select_d7 = opb.new(f"endpoint_degree_7_vertex_{v}")
+            select_d6 = opb.new(f"endpoint_degree_6_vertex_{v}")
+            selectors_d7.append(select_d7)
+            selectors_d6.append(select_d6)
+            all_selectors.extend((select_d7, select_d6))
+
+            for selector, branch, degree in (
+                (select_d7, branch_d7, 7),
+                (select_d6, branch_d6, 6),
+            ):
+                opb.add([(1, branch), (-1, selector)], ">=", 0)
+                opb.add([(1, zero[v]), (-1, selector)], ">=", 0)
+                opb.add(
+                    [(1, edge) for edge in outgoing]
+                    + [(-degree, selector)],
+                    ">=",
+                    0,
+                )
+                opb.add(
+                    [(1, edge) for edge in outgoing]
+                    + [((n - 1) - degree, selector)],
+                    "<=",
+                    n - 1,
+                )
+
+        opb.add(
+            [(1, selector) for selector in selectors_d7]
+            + [(-1, branch_d7)],
+            ">=",
+            0,
+        )
+        opb.add(
+            [(1, selector) for selector in selectors_d6]
+            + [(-1, branch_d6)],
+            ">=",
+            0,
+        )
+        opb.add([(1, selector) for selector in all_selectors], "=", 1)
+        opb.add(all_blockers + [(-20, branch_d6)], ">=", 0)
+
     other_vertices = list(range(1, n))
     for mask in range(1, 1 << (n - 1)):
         inside = {
@@ -475,6 +638,7 @@ def build_opb(n: int, min_total_blockers: int = 0) -> OPBEncoding:
     return OPBEncoding(
         n=n,
         min_total_blockers=min_total_blockers,
+        endpoint_closures=endpoint_closures,
         builder=opb,
         arcs=arc,
         blocker=blocker,
@@ -507,7 +671,7 @@ def solve_cnf(
         sat = solver.solve()
         elapsed = time.perf_counter() - started
         record = {
-            "model_version": MODEL_VERSION,
+            "model_version": model_version(encoding.endpoint_closures),
             "n": encoding.n,
             "solver": solver_name,
             "status": "SAT" if sat else "UNSAT",
@@ -515,6 +679,7 @@ def solve_cnf(
             "variables": encoding.cnf.nv,
             "clauses": len(encoding.cnf.clauses),
             "min_total_blockers": encoding.min_total_blockers,
+            "endpoint_closures": encoding.endpoint_closures,
         }
         if sat:
             model = solver.get_model()
@@ -537,6 +702,14 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--n", type=int, default=16)
     parser.add_argument("--min-total-blockers", type=int)
+    parser.add_argument(
+        "--endpoint-closures",
+        action="store_true",
+        help=(
+            "apply the exact n=16 v5/v6 endpoint residual closure "
+            "(zero d=7 with B>=16, or zero d=6 with B>=20)"
+        ),
+    )
     parser.add_argument("--cnf", type=Path)
     parser.add_argument("--opb", type=Path)
     parser.add_argument("--metadata", type=Path)
@@ -556,27 +729,37 @@ def main() -> int:
 
     cnf_encoding = None
     metadata = {
-        "model_version": MODEL_VERSION,
+        "model_version": model_version(args.endpoint_closures),
         "n": args.n,
         "min_total_blockers": minimum,
+        "endpoint_closures": args.endpoint_closures,
     }
     if args.cnf or args.solve:
-        cnf_encoding = build_cnf(args.n, minimum)
+        cnf_encoding = build_cnf(
+            args.n,
+            minimum,
+            endpoint_closures=args.endpoint_closures,
+        )
         metadata["cnf"] = cnf_encoding.metadata()
         if args.cnf:
             args.cnf.parent.mkdir(parents=True, exist_ok=True)
             cnf_encoding.cnf.to_file(args.cnf)
 
     if args.opb:
-        opb_encoding = build_opb(args.n, minimum)
+        opb_encoding = build_opb(
+            args.n,
+            minimum,
+            endpoint_closures=args.endpoint_closures,
+        )
         metadata["opb"] = opb_encoding.metadata()
         args.opb.parent.mkdir(parents=True, exist_ok=True)
         opb_encoding.builder.write(
             args.opb,
             [
-                MODEL_VERSION,
+                model_version(args.endpoint_closures),
                 f"Pisa tournament n={args.n}",
                 f"minimum total blockers={minimum}",
+                f"endpoint closures={args.endpoint_closures}",
             ],
         )
 

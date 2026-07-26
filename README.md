@@ -285,3 +285,37 @@ The smoke workflow samples all 34 models for five seconds.  The formal
 workflow gives each invariant box a continuous one-hour budget and stores
 the complete JSON/log artifact.  An `UNKNOWN` box is not rerun unchanged:
 the next refinement will split only that box by a second invariant.
+
+## v12 hybrid symmetry/endpoint benchmark
+
+The v11 SMS benchmark deliberately used only permutation-invariant base
+constraints.  At cutoff 32 it produced 835 complete canonical cubes, but 15
+of 16 sampled cubes remained `UNKNOWN` after 120 seconds.  v12 keeps the same
+unlabelled SMS search and adds the exact global endpoint closure already
+certified by the v5/v6 campaigns:
+
+```text
+some zero-margin vertex has d=7 and B>=16,
+or
+some zero-margin vertex has d=6 and B>=20.
+```
+
+The selected endpoint is existentially quantified over all 16 vertices.  No
+vertex number, local median order, or template is fixed, so the projected
+formula remains invariant under every vertex permutation and SMS canonical
+partitioning remains sound.  Previously closed profiles and low-blocker
+layers are thereby removed before cubing instead of being rediscovered by
+each residual solver.
+
+Run the short CPU benchmark with:
+
+```bash
+python scripts/kaggle_v12_hybrid_benchmark.py
+```
+
+It performs closure-free K8/K14/K15 correctness gates, builds the baseline and
+hybrid K16 formulas, obtains complete SMS partitions at cutoffs
+`32,40,48,56,64`, and solves eight stratified cubes from every complete
+partition for 30 seconds each.  `SAT` is accepted only after the standalone
+bit-mask verifier succeeds; timeout is recorded as `UNKNOWN`.  Results are
+written to `/kaggle/working/k16-v12-results/v12-hybrid-summary.json`.
