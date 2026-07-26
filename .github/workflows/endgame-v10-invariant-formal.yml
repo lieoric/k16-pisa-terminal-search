@@ -1,0 +1,164 @@
+name: K16 Pisa v10 invariant refinement exact matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds_per_box:
+        description: Continuous solver budget for each invariant box
+        required: true
+        default: "3600"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k16-pisa-v10-invariant-formal
+  cancel-in-progress: false
+
+jobs:
+  gates:
+    name: Positive and exact-coverage gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run K12/K14 and 34-box coverage gates
+        run: |
+          mkdir -p results
+          python scripts/median_order_v10.py \
+            --gates-only --gate-seconds 60 --workers 4 \
+            --output results/gates.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v10-invariant-formal-gates
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+
+  plan:
+    name: Generate 34 invariant boxes
+    needs: gates
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - id: matrix
+        shell: bash
+        run: |
+          matrix="$(python scripts/median_order_v10.py --matrix)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          python - <<'PY'
+          import json, subprocess
+          matrix = json.loads(subprocess.check_output(
+              ["python", "scripts/median_order_v10.py", "--matrix"],
+              text=True,
+          ))
+          assert len(matrix["include"]) == 34
+          assert len({row["box"] for row in matrix["include"]}) == 34
+          PY
+
+  boxes:
+    name: Exact invariant ${{ matrix.box }}
+    needs:
+      - gates
+      - plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Solve one disjoint invariant box
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "results/${{ matrix.box }}"
+          python scripts/median_order_v10.py \
+            --box "${{ matrix.box }}" \
+            --seconds "${{ inputs.seconds_per_box || '3600' }}" \
+            --workers 4 \
+            --seed "$((20260727 + ${{ matrix.index }}))" \
+            --output "results/${{ matrix.box }}/result.json" \
+            2>&1 | tee "results/${{ matrix.box }}/run.log"
+      - name: Add logical status to job summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          p = Path("results/${{ matrix.box }}/result.json")
+          if not p.exists():
+              print("## ERROR: result.json was not produced")
+          else:
+              r = json.loads(p.read_text())
+              print(f"## {r['box']}: {r['status']}")
+              print(f"- Parent: `{r['parent']}`")
+              print(f"- Split: `{r['split_kind']} = {r['split_value']}`")
+              print(f"- Runtime: `{r['seconds']}` seconds")
+              print(f"- Conflicts / branches: `{r['conflicts']} / {r['branches']}`")
+              if r["status"] == "SAT":
+                  print("- **Independent verifier accepted a K16 witness.**")
+              elif r["status"] == "UNSAT":
+                  print("- This exact invariant subbox is permanently closed.")
+              else:
+                  print("- UNKNOWN: split this subbox by a second invariant.")
+          PY
+      - name: Upload JSON and complete log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v10-invariant-${{ matrix.box }}
+          path: results/${{ matrix.box }}/
+          if-no-files-found: error
+          retention-days: 90
+
+  summary:
+    name: Aggregate the 34-box invariant map
+    if: ${{ always() && needs.boxes.result != 'skipped' }}
+    needs: boxes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: endgame-v10-invariant-inv_*
+          path: downloaded
+      - name: Build logical summary
+        shell: bash
+        run: |
+          mkdir -p summary
+          python scripts/aggregate_endgame.py downloaded \
+            --label "v10 exact invariant refinement of the v7.1 residual" \
+            --expected 34 \
+            --output summary/v10-invariant-summary.json \
+            | tee summary/v10-invariant-summary.md
+          cat summary/v10-invariant-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v10-invariant-summary
+          path: summary/
+          if-no-files-found: error
+          retention-days: 90

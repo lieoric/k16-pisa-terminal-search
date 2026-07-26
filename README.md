@@ -238,3 +238,22 @@ confirms the K16 witness.
 
 Primary reference:
 [Havet and Thomasse, Median Orders of Tournaments](https://www.math.ru.nl/OpenGraphProblems/TimV/%5BHavet%20and%20Thomass%C3%A9%5D%20Median%20Orders%20of%20Tournaments.pdf).
+
+## v10 invariant refinement
+
+Run `30208791250` completed all 48 v7.1 cubes: 18 were `UNSAT` and 30
+remained `UNKNOWN`.  v10 compiles the 18 exact closures into compact cuts,
+then repartitions the complete residual by blocker invariants rather than by
+more arbitrary labelled edges.
+
+For a `(d,b)=(7,1)` feed, v10 fixes the degree of the unique blocker.  After
+the completed v6 blocker-degree closures, the five total-blocker layers
+produce 26 mutually exclusive boxes.  For `(d,b)=(6,3), B>=20`, v10 fixes
+the minimum degree among the three blockers, giving another eight boxes.
+The resulting 34 boxes are disjoint and exactly cover the 30 open v7.1
+cubes.  The coverage gate checks this identity before any solver job starts.
+
+The smoke workflow samples all 34 models for five seconds.  The formal
+workflow gives each invariant box a continuous one-hour budget and stores
+the complete JSON/log artifact.  An `UNKNOWN` box is not rerun unchanged:
+the next refinement will split only that box by a second invariant.
