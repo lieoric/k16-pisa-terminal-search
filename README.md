@@ -198,6 +198,34 @@ closures. A SAT result is an unconditional independently verified K16 Pisa
 witness. An UNSAT result closes exactly one named box; only all 111 UNSAT
 results close the remaining global endpoint.
 
+## v9 Kaggle elite-repair evidence (revised)
+
+Kaggle version
+[`338131697`](https://www.kaggle.com/code/chamine/k16-pisa-v9-elite-exact-repair?scriptVersionId=338131697)
+loaded all 54 one-offender near-witnesses from the v8 GPU campaign.  Its
+positive K14 gate returned a verified `SAT`.  The run was later cancelled
+during the outermost shell wave, so it is **partial evidence**, not a global
+K16 decision.
+
+The exact completed closures are:
+
+- all 54 labelled Hamming shells at distance `1..2` from their canonical
+  elite centre are `UNSAT`;
+- all 54 labelled Hamming shells at distance `3..4` are `UNSAT`;
+- all 54 complete labelled score-vector fibres are `UNSAT`;
+- the distance `5..6` shells are `UNSAT` only for source shards
+  `0, 7, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 23`.
+
+For distance `5..6`, shards `1, 2, 3, 4, 5, 6, 8, 9, 12` timed out and remain
+`UNKNOWN`; shards `21, 22, 24..53` were not reached before cancellation.
+Those 41 shells remain open.
+
+These are labelled neighbourhood statements after the zero-role
+canonicalisation used by `scripts/v8_elite_exact_repair.py`.  They do not
+close an entire endpoint branch, an isomorphism-orbit Hamming ball, or K16
+itself.  A machine-readable transcription of the completed log is stored in
+`evidence/v9-kaggle-338131697.json`.
+
 ## v7.1 local-median-order exact campaign
 
 The v7.1 campaign is an independent exact formulation based on Havet and
