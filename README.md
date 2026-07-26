@@ -197,3 +197,35 @@ The second stage is exhaustive relative to the listed theorem and solver
 closures. A SAT result is an unconditional independently verified K16 Pisa
 witness. An UNSAT result closes exactly one named box; only all 111 UNSAT
 results close the remaining global endpoint.
+
+## v7 local-median-order exact campaign
+
+The v7 campaign is an independent exact formulation based on Havet and
+Thomasse's local median orders.  We may relabel a local median order as
+
+```text
+1, 2, ..., 15, 0
+```
+
+because its feed vertex has a large second neighbourhood and therefore has
+margin zero in every Pisa tournament.  The model adds the feedback property
+on every interval.  These constraints also give a directed Hamiltonian path,
+so exact strong connectivity needs only one reverse arc across each of the
+15 proper prefix cuts; the score-permutation and rooted-role encodings are
+not used.
+
+The smoke workflow validates fixed K12 and K14 Pisa witnesses under this
+encoding, then builds all six remaining parent layers for ten seconds.  The
+formal workflow runs the six complete layers in parallel:
+
+```text
+(d,b)=(7,1), B=16,17,18,19,>=20
+(d,b)=(6,3), B>=20
+```
+
+Each `UNSAT` result closes the full named parent layer, rather than a single
+anchor-orbit slice. `SAT` is accepted only after the independent bit-mask
+verifier confirms the K16 witness.
+
+Primary reference:
+[Havet and Thomasse, Median Orders of Tournaments](https://www.math.ru.nl/OpenGraphProblems/TimV/%5BHavet%20and%20Thomass%C3%A9%5D%20Median%20Orders%20of%20Tournaments.pdf).

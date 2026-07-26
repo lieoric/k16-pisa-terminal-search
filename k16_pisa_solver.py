@@ -593,6 +593,12 @@ class TerminalTournamentModel:
                 ]
                 outside = [v for v in all_vertices if v not in subset]
                 m.AddBoolOr([A(x, y) for x in subset for y in outside])
+        elif strongness_mode == "external":
+            # A specialized caller may provide its own exact strong-connectivity
+            # encoding.  For example, a fixed local median order is a directed
+            # Hamiltonian path, so one reverse arc across each proper prefix is
+            # necessary and sufficient for strongness.
+            pass
         else:
             raise ValueError(f"unknown strongness mode: {strongness_mode}")
 
