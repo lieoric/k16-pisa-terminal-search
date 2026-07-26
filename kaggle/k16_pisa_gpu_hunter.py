@@ -226,7 +226,9 @@ def run_shard(
 
     population = initial_population(batch, target_degree, device, generator)
     metrics = evaluate(population, target_degree, target_blockers)
-    losses = metrics["loss"]
+    # evaluate() runs under inference_mode for speed. Clone the persistent
+    # population scores into ordinary storage before steady-state updates.
+    losses = metrics["loss"].clone()
     best_index = int(losses.argmin())
     best_bits = population[best_index].clone()
     best_loss = int(losses[best_index])
