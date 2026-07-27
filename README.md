@@ -5,6 +5,11 @@ The current proof/computation ledger is
 It separates theorem-level results, exact solver closures, heuristic evidence,
 and still-open regions, and includes the completed `h13_p00=(4,1^12)` closure.
 
+The active exact campaign is now the last module-size-three box
+`h14_p00=(3,1^13)`.  Its colour-symmetric SMS formulation, twelve-way exact
+partition, gates, and certification rules are documented in
+[`docs/H14_MODULE3_SMS_CAMPAIGN.md`](docs/H14_MODULE3_SMS_CAMPAIGN.md).
+
 ## Current phase: exact weighted quotient ladder (h=10..15)
 
 The independent audit has exhaustively closed weighted quotient orders
