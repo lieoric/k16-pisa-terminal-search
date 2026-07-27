@@ -7,12 +7,6 @@ on:
         description: Continuous SMS time for each exact heavy-degree slice
         required: true
         default: "19200"
-  pull_request:
-    paths:
-      - ".github/workflows/h14-module3-sms-long.yml"
-      - "scripts/h14_module3_sms.py"
-      - "pisa_verify.py"
-      - "requirements-sat.txt"
 
 permissions:
   contents: read
@@ -69,6 +63,13 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release
           cmake --build tools/sms/build -j4
           test -x tools/sms/build/src/smsg
+          mkdir -p bundle/lib
+          cp tools/sms/build/src/smsg bundle/smsg
+          ldd tools/sms/build/src/smsg | tee gates/smsg-ldd.txt
+          ldd tools/sms/build/src/smsg \
+            | awk '/libboost_/ {print $3}' \
+            | xargs -r -I '{}' cp '{}' bundle/lib/
+          test -n "$(find bundle/lib -maxdepth 1 -name 'libboost_*' -print -quit)"
       - id: plan
         name: Emit the complete heavy-outdegree partition
         shell: bash
@@ -79,7 +80,7 @@ jobs:
         with:
           name: h14-module3-sms-binary-and-gates
           path: |
-            tools/sms/build/src/smsg
+            bundle/
             gates/
           retention-days: 90
 
@@ -107,12 +108,13 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          chmod +x prepared/tools/sms/build/src/smsg
+          chmod +x prepared/bundle/smsg
+          export LD_LIBRARY_PATH="$PWD/prepared/bundle/lib:${LD_LIBRARY_PATH:-}"
           mkdir -p cnf results logs
           python scripts/h14_module3_sms.py \
             --solve \
             --degree "${{ matrix.degree }}" \
-            --binary prepared/tools/sms/build/src/smsg \
+            --binary prepared/bundle/smsg \
             --seconds "$SOLVE_SECONDS" \
             --cnf "cnf/${{ matrix.slice_id }}.cnf" \
             --result "results/${{ matrix.slice_id }}.json" \

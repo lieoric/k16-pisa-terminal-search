@@ -543,6 +543,8 @@ def classify(returncode: int, text: str, timed_out: bool) -> str:
         return "SAT"
     if returncode == 20:
         return "UNSAT"
+    if returncode != 0:
+        return "ERROR"
     upper = text.upper()
     matches = re.findall(r"RESULT:\s*(\d+)", upper)
     if matches:
