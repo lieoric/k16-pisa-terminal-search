@@ -9,7 +9,7 @@ from pathlib import Path
 
 REPOSITORY = "https://github.com/lieoric/k16-pisa-terminal-search.git"
 BRANCH = "agent/k16-endpoint-endgame"
-SOURCE = Path("/kaggle/working/k16-pisa-terminal-search")
+SOURCE = Path("/kaggle/temp/k16-pisa-terminal-search")
 
 
 def run(command: list[str], cwd: Path | None = None) -> None:

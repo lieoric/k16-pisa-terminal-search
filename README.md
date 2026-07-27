@@ -445,3 +445,19 @@ the best 40% advance, then only the best 30% receive the longest budget.
 Every round changes the random seed and checkpoints each endpoint separately.
 Targets below the exact campaign's `sum(b) >= 16` frontier are skipped. A miss
 is only a heuristic miss; a hit is an independently verified K16 witness.
+
+## Weighted quotient audit
+
+`scripts/weighted_quotient_audit.py` independently checks the lexicographic-sum
+margin identity and the weighted quotient ladder for total weight 16. It
+downloads Brendan McKay's published non-isomorphic tournament catalogues with
+pinned SHA-256 hashes, runs positive K6/K14 construction gates, cross-checks
+orders 3 through 6 in Python, and scans orders 3 through 9 with a separate
+OpenMP C++ implementation.
+
+The completed Kaggle audit examined 1,186,827,955 strong-quotient/weight pairs
+and found no feasible pair for quotient orders 3 through 9. The exact logical
+consequence recorded here is one-way: a K16 Pisa witness has no module of size
+at least 8. It is not a proof that K16 has no witness, and it does not claim the
+converse about module size. The archived evidence is in
+`evidence/weighted-quotient-audit-kaggle-20260727.json`.

@@ -1,0 +1,100 @@
+{
+  "schema": "k16-pisa-weighted-quotient-audit-evidence-v1",
+  "status": "PASS_EXHAUSTIVE_H3_TO_H9",
+  "created_utc": "2026-07-27T02:03:21.625970+00:00",
+  "kaggle_url": "https://www.kaggle.com/code/chamine/k16-pisa-weighted-quotient-audit",
+  "git_commit": "162caa9",
+  "target_weight": 16,
+  "catalogue_source": "https://users.cecs.anu.edu.au/~bdm/data",
+  "catalogue_sha256": {
+    "3": "bd80212b5dec58aa23efffad0820023557b925e6203524c183471c6db056a08d",
+    "4": "94683551f4a9be3f7182dfe60b6d880bfb88889382029e1ca47a43af1576f4af",
+    "5": "712da2b5b6402f230f8f9e3cdad044f8115073d42e3ccbcf1f3502ee620172cc",
+    "6": "d9c85e10aaa6a1a71d0358f828ee01a2c5a7a8ad5cb7705ee503231d7d73c8f7",
+    "7": "0cfe541b63bbb90eecda8d6e1f717aaba021c1a6d8ba6fe7cf6ba7bd58b9fd86",
+    "8": "26203e97cc710e14aa64a426512618add39b9f42f7a619dcf3058c35df15b37a",
+    "9": "1f71781ef5b9a27858b1af167f2fda4346e61f1e4fb78faf2bddfa5948de9b62"
+  },
+  "gates": {
+    "random_lexicographic_tests": 250,
+    "random_vertices_checked": 3132,
+    "positive_gate_c3_weights_2": true,
+    "positive_gate_c7_weights_2": true,
+    "negative_gate_c3_sum_16": true,
+    "python_cpp_agreement_h3_to_h6": true
+  },
+  "rows": [
+    {
+      "h": 3,
+      "catalogue_tournaments": 2,
+      "strong_tournaments": 1,
+      "weight_vectors": 105,
+      "tested_pairs": 105,
+      "feasible_pairs": 0
+    },
+    {
+      "h": 4,
+      "catalogue_tournaments": 4,
+      "strong_tournaments": 1,
+      "weight_vectors": 455,
+      "tested_pairs": 455,
+      "feasible_pairs": 0
+    },
+    {
+      "h": 5,
+      "catalogue_tournaments": 12,
+      "strong_tournaments": 6,
+      "weight_vectors": 1365,
+      "tested_pairs": 8190,
+      "feasible_pairs": 0
+    },
+    {
+      "h": 6,
+      "catalogue_tournaments": 56,
+      "strong_tournaments": 35,
+      "weight_vectors": 3003,
+      "tested_pairs": 105105,
+      "feasible_pairs": 0
+    },
+    {
+      "h": 7,
+      "catalogue_tournaments": 456,
+      "strong_tournaments": 353,
+      "weight_vectors": 5005,
+      "tested_pairs": 1766765,
+      "feasible_pairs": 0
+    },
+    {
+      "h": 8,
+      "catalogue_tournaments": 6880,
+      "strong_tournaments": 6008,
+      "weight_vectors": 6435,
+      "tested_pairs": 38661480,
+      "feasible_pairs": 0
+    },
+    {
+      "h": 9,
+      "catalogue_tournaments": 191536,
+      "strong_tournaments": 178133,
+      "weight_vectors": 6435,
+      "tested_pairs": 1146285855,
+      "feasible_pairs": 0
+    }
+  ],
+  "tested_pairs_total": 1186827955,
+  "cpp": {
+    "compiler": "g++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+    "openmp_threads": 4,
+    "source_sha256": "d1b4c7a50a18744cf9347f7b09bd112a00789d50afce40ecdb7323a46e60c4a7",
+    "wall_seconds": 5.404053185000009
+  },
+  "logical_scope": {
+    "proved_by_computation": "No strong weighted quotient of order 3 through 9 with positive integer weights summing to 16 satisfies every weighted strict-second-neighborhood margin <= 0.",
+    "module_consequence": "Any K16 Pisa witness has no module of size at least 8.",
+    "not_claimed": [
+      "The converse between h <= 9 quotients and module size.",
+      "Nonexistence of a K16 Pisa witness.",
+      "Any conclusion about quotient orders 10 through 16."
+    ]
+  }
+}
