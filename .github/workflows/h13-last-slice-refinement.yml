@@ -19,6 +19,10 @@ on:
         description: CP-SAT workers per job
         required: true
         default: "4"
+  pull_request:
+    paths:
+      - "scripts/h13_last_slice_refinement.py"
+      - ".github/workflows/h13-last-slice-refinement.yml"
 
 permissions:
   contents: read
