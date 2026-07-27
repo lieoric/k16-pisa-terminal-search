@@ -1,0 +1,450 @@
+name: K16 quotient cube-and-conquer refinement
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage1_seconds:
+        description: Seconds per fixed-weight-assignment cube
+        required: true
+        default: "900"
+      stage2_seconds:
+        description: Seconds per least-second-zero refinement cube
+        required: true
+        default: "1800"
+      workers:
+        description: CP-SAT workers per job
+        required: true
+        default: "4"
+  pull_request:
+    paths:
+      - "scripts/weighted_quotient_cube_refinement.py"
+      - ".github/workflows/quotient-cube-refinement.yml"
+      - "scripts/weighted_quotient_ladder.py"
+      - "requirements.txt"
+      - "pisa_verify.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k16-quotient-cube-refinement
+  cancel-in-progress: false
+
+env:
+  STAGE1_SECONDS: ${{ inputs.stage1_seconds || '900' }}
+  STAGE2_SECONDS: ${{ inputs.stage2_seconds || '1800' }}
+  WORKERS: ${{ inputs.workers || '4' }}
+
+jobs:
+  gate-and-plan:
+    name: Exact partition and positive/negative gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - id: plan
+        name: Generate the 42 disjoint stage-one cubes
+        shell: bash
+        run: |
+          echo "matrix=$(python scripts/weighted_quotient_cube_refinement.py \
+            --stage1-matrix)" >> "$GITHUB_OUTPUT"
+      - name: Run fixed-assignment and least-zero gates
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p gates
+          python scripts/weighted_quotient_cube_refinement.py \
+            --gates --seconds 30 --workers "$WORKERS" \
+            --output gates/gates.json 2>&1 | tee gates/gates.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quotient-cube-gates
+          path: gates/
+          retention-days: 90
+
+  stage1:
+    name: S1 ${{ matrix.cube_id }} / ${{ matrix.assignment_code }}
+    needs: gate-and-plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.gate-and-plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Solve fixed weight assignment
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python scripts/weighted_quotient_cube_refinement.py \
+            --solve-cube \
+            --box "${{ matrix.box }}" \
+            --assignment "${{ matrix.assignment_csv }}" \
+            --seconds "$STAGE1_SECONDS" \
+            --workers "$WORKERS" \
+            --output results/result.json \
+            2>&1 | tee "logs/${{ matrix.cube_id }}.log"
+      - name: Publish exact slice status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          path = Path("results/result.json")
+          if not path.exists():
+              print("## ERROR\n\nNo result JSON was produced.")
+          else:
+              r = json.loads(path.read_text())
+              print(f"## {r['slice_id']}: {r['status']}")
+              print(f"\n- parent: `{r['parent_box']}`")
+              print(f"- fixed weights: `{r['weights_by_vertex_fixed']}`")
+              print(f"- wall seconds: `{r['wall_seconds']}`")
+              print(f"- branches: `{r['branches']}`")
+              print(f"- conflicts: `{r['conflicts']}`")
+              if r["status"] == "UNKNOWN":
+                  print("- will be partitioned by the least second zero class")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quotient-cube-stage1-${{ matrix.cube_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Make UNKNOWN or ERROR visible
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("results/result.json")
+          if not path.exists():
+              raise SystemExit("ERROR: no result JSON")
+          status = json.loads(path.read_text()).get("status")
+          if status == "UNKNOWN":
+              raise SystemExit("UNKNOWN: queued for exact stage-two partition")
+          if status == "ERROR":
+              raise SystemExit("ERROR: solver/model failure")
+          print(f"Exact logical status: {status}")
+          PY
+
+  refine-plan:
+    name: Build stage-two matrices from only UNKNOWN cubes
+    needs: stage1
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      h13_matrix: ${{ steps.matrix.outputs.h13_matrix }}
+      h14_matrix: ${{ steps.matrix.outputs.h14_matrix }}
+      h15_matrix: ${{ steps.matrix.outputs.h15_matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: quotient-cube-stage1-*
+          path: downloaded
+          merge-multiple: false
+      - id: matrix
+        name: Partition each UNKNOWN by its least second zero class
+        shell: bash
+        run: |
+          mkdir -p plan
+          python scripts/weighted_quotient_cube_refinement.py \
+            --refine-plan downloaded --output plan/refine-plan.json
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          plan = json.loads(Path("plan/refine-plan.json").read_text())
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              for key in ("h13", "h14", "h15"):
+                  rows = plan["matrices"][key]
+                  if not rows:
+                      rows = [{
+                          "skip": True,
+                          "cube_id": "none",
+                          "box": "none",
+                          "assignment_csv": "1",
+                          "second_zero": 1,
+                      }]
+                  payload = json.dumps({"include": rows}, separators=(",", ":"))
+                  print(f"{key}_matrix={payload}", file=out)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quotient-cube-refine-plan
+          path: plan/
+          retention-days: 90
+
+  refine-h13:
+    name: S2 h13 ${{ matrix.cube_id }} / z${{ matrix.second_zero }}
+    needs: refine-plan
+    if: always() && needs.refine-plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.refine-plan.outputs.h13_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        if: matrix.skip != true
+      - uses: actions/setup-python@v5
+        if: matrix.skip != true
+        with:
+          python-version: "3.12"
+          cache: pip
+      - if: matrix.skip != true
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Solve least-second-zero cube
+        if: matrix.skip != true
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python scripts/weighted_quotient_cube_refinement.py \
+            --solve-cube --box "${{ matrix.box }}" \
+            --assignment "${{ matrix.assignment_csv }}" \
+            --second-zero "${{ matrix.second_zero }}" \
+            --seconds "$STAGE2_SECONDS" --workers "$WORKERS" \
+            --output results/result.json \
+            2>&1 | tee "logs/${{ matrix.cube_id }}_z${{ matrix.second_zero }}.log"
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.skip != true
+        with:
+          name: quotient-cube-stage2-${{ matrix.cube_id }}-z${{ matrix.second_zero }}
+          path: |
+            results/
+            logs/
+          retention-days: 90
+      - name: Make UNKNOWN or ERROR visible
+        if: always() && matrix.skip != true
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("results/result.json")
+          if not path.exists():
+              raise SystemExit("ERROR: no result JSON")
+          r = json.loads(path.read_text())
+          print(f"{r['slice_id']}: {r['status']}")
+          if r["status"] in {"UNKNOWN", "ERROR"}:
+              raise SystemExit(f"{r['status']}: refined slice remains open")
+          PY
+
+  refine-h14:
+    name: S2 h14 ${{ matrix.cube_id }} / z${{ matrix.second_zero }}
+    needs: refine-plan
+    if: always() && needs.refine-plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.refine-plan.outputs.h14_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        if: matrix.skip != true
+      - uses: actions/setup-python@v5
+        if: matrix.skip != true
+        with:
+          python-version: "3.12"
+          cache: pip
+      - if: matrix.skip != true
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Solve least-second-zero cube
+        if: matrix.skip != true
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python scripts/weighted_quotient_cube_refinement.py \
+            --solve-cube --box "${{ matrix.box }}" \
+            --assignment "${{ matrix.assignment_csv }}" \
+            --second-zero "${{ matrix.second_zero }}" \
+            --seconds "$STAGE2_SECONDS" --workers "$WORKERS" \
+            --output results/result.json \
+            2>&1 | tee "logs/${{ matrix.cube_id }}_z${{ matrix.second_zero }}.log"
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.skip != true
+        with:
+          name: quotient-cube-stage2-${{ matrix.cube_id }}-z${{ matrix.second_zero }}
+          path: |
+            results/
+            logs/
+          retention-days: 90
+      - name: Make UNKNOWN or ERROR visible
+        if: always() && matrix.skip != true
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("results/result.json")
+          if not path.exists():
+              raise SystemExit("ERROR: no result JSON")
+          r = json.loads(path.read_text())
+          print(f"{r['slice_id']}: {r['status']}")
+          if r["status"] in {"UNKNOWN", "ERROR"}:
+              raise SystemExit(f"{r['status']}: refined slice remains open")
+          PY
+
+  refine-h15:
+    name: S2 h15 ${{ matrix.cube_id }} / z${{ matrix.second_zero }}
+    needs: refine-plan
+    if: always() && needs.refine-plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.refine-plan.outputs.h15_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        if: matrix.skip != true
+      - uses: actions/setup-python@v5
+        if: matrix.skip != true
+        with:
+          python-version: "3.12"
+          cache: pip
+      - if: matrix.skip != true
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Solve least-second-zero cube
+        if: matrix.skip != true
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python scripts/weighted_quotient_cube_refinement.py \
+            --solve-cube --box "${{ matrix.box }}" \
+            --assignment "${{ matrix.assignment_csv }}" \
+            --second-zero "${{ matrix.second_zero }}" \
+            --seconds "$STAGE2_SECONDS" --workers "$WORKERS" \
+            --output results/result.json \
+            2>&1 | tee "logs/${{ matrix.cube_id }}_z${{ matrix.second_zero }}.log"
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.skip != true
+        with:
+          name: quotient-cube-stage2-${{ matrix.cube_id }}-z${{ matrix.second_zero }}
+          path: |
+            results/
+            logs/
+          retention-days: 90
+      - name: Make UNKNOWN or ERROR visible
+        if: always() && matrix.skip != true
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("results/result.json")
+          if not path.exists():
+              raise SystemExit("ERROR: no result JSON")
+          r = json.loads(path.read_text())
+          print(f"{r['slice_id']}: {r['status']}")
+          if r["status"] in {"UNKNOWN", "ERROR"}:
+              raise SystemExit(f"{r['status']}: refined slice remains open")
+          PY
+
+  aggregate:
+    name: Accumulate exact closure of module sizes 2, 3, and 4
+    needs:
+      - stage1
+      - refine-plan
+      - refine-h13
+      - refine-h14
+      - refine-h15
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: quotient-cube-stage*
+          path: downloaded
+          merge-multiple: false
+      - name: Aggregate exact slice statuses
+        shell: bash
+        run: |
+          mkdir -p aggregate
+          python scripts/weighted_quotient_cube_refinement.py \
+            --aggregate downloaded --output aggregate/summary.json \
+            2>&1 | tee aggregate/aggregate.log
+      - name: Publish exact campaign summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          path = Path("aggregate/summary.json")
+          if not path.exists():
+              print("## Aggregate failed")
+          else:
+              r = json.loads(path.read_text())
+              print(f"## Cube refinement: {r['status']}")
+              print(f"\n- records: `{r['records_returned']}`")
+              print(f"- SAT slices: `{r['sat_slices']}`")
+              for box, summary in r["parents"].items():
+                  print(
+                      f"- `{box}`: **{summary['status']}**, "
+                      f"{summary['assignments_closed']}/"
+                      f"{summary['assignments_total']} assignments closed, "
+                      f"{len(summary['open_refined_slices'])} returned-open and "
+                      f"{len(summary['missing_slices'])} missing refined slices"
+                  )
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quotient-cube-aggregate
+          path: aggregate/
+          retention-days: 90
+      - name: Make incomplete campaign visible
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("aggregate/summary.json")
+          if not path.exists():
+              raise SystemExit("ERROR: aggregate summary missing")
+          status = json.loads(path.read_text()).get("status")
+          if status == "INCOMPLETE":
+              raise SystemExit("INCOMPLETE: exact open slices remain")
+          print(f"Final logical status: {status}")
+          PY
