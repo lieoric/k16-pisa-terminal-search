@@ -11,6 +11,13 @@ on:
         description: CP-SAT workers per job
         required: true
         default: "4"
+  pull_request:
+    paths:
+      - "scripts/weighted_quotient_ladder.py"
+      - "scripts/aggregate_weighted_ladder.py"
+      - ".github/workflows/weighted-ladder-formal.yml"
+      - "requirements.txt"
+      - "pisa_verify.py"
 
 permissions:
   contents: read
@@ -47,7 +54,7 @@ jobs:
           mkdir -p gates
           python scripts/weighted_quotient_ladder.py \
             --gates --seconds 30 \
-            --workers "${{ inputs.workers }}" \
+            --workers "${{ inputs.workers || '4' }}" \
             --output gates/gates.json 2>&1 | tee gates/gates.log
       - uses: actions/upload-artifact@v4
         if: always()
@@ -79,8 +86,8 @@ jobs:
           mkdir -p results logs
           python scripts/weighted_quotient_ladder.py \
             --box "${{ matrix.box }}" \
-            --seconds "${{ inputs.seconds }}" \
-            --workers "${{ inputs.workers }}" \
+            --seconds "${{ inputs.seconds || '18000' }}" \
+            --workers "${{ inputs.workers || '4' }}" \
             --output results/result.json \
             2>&1 | tee "logs/${{ matrix.box }}.log"
       - name: Add exact status to job summary
