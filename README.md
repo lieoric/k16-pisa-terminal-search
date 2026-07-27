@@ -1,5 +1,51 @@
 # K16 Pisa tournament terminal search
 
+## Current phase: exact weighted quotient ladder (h=10..15)
+
+The independent audit has exhaustively closed weighted quotient orders
+`h=3..9`.  The next exact phase searches all 29 integer partitions of 16 into
+`h=10..15` positive fibre sizes:
+
+| quotient order | weight multisets |
+|---:|---:|
+| 15 | 1 |
+| 14 | 2 |
+| 13 | 3 |
+| 12 | 5 |
+| 11 | 7 |
+| 10 | 11 |
+
+`.github/workflows/weighted-ladder-smoke.yml` first runs:
+
+- 100 independent lexicographic-margin identity checks;
+- positive weighted quotient gates `C3[TT2]` and `Q7[TT2]`;
+- an unequal-weight negative `C3` gate;
+- short h=15/h=14 frontier searches.
+
+`.github/workflows/weighted-ladder-formal.yml` then launches one Ubuntu job per
+weight multiset.  Each job writes a complete log and a machine-readable
+`result.json`.  A `SAT` result is expanded with transitive fibres to an explicit
+K16 tournament and accepted only after the dependency-free bit-mask verifier
+confirms it.  `UNSAT` closes exactly the named weight multiset; `UNKNOWN` closes
+nothing and is deliberately made visible as an incomplete job.
+
+The exact model uses only two structural reductions:
+
+1. a fixed directed Hamilton cycle, which is lossless for a strong quotient;
+2. at least two zero weighted-margin classes.  This follows by applying the
+   Havet--Thomasse two-Seymour-vertices theorem to the transitive-fibre
+   expansion: the expansion has no globally dominated vertex, and only a
+   fibre sink can have zero internal margin.
+
+The empirical statement “there are at least three zero classes” is **not** a
+constraint.  Weights remain variables with the prescribed multiplicities, so
+fixing the Hamilton cycle does not accidentally fix the order of unequal fibre
+sizes.
+
+If all 29 boxes are `UNSAT`, the result closes every decomposable K16 candidate
+whose strong quotient has order 10 through 15.  Primitive quotient order 16 is
+outside this phase and remains a separate final problem.
+
 ## Current two-platform campaign (v6/v8)
 
 The two platforms deliberately do different work:

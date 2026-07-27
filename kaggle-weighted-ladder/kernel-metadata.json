@@ -1,0 +1,13 @@
+{
+  "id": "chamine/k16-pisa-weighted-ladder-frontier",
+  "title": "K16 Pisa Weighted Ladder Frontier",
+  "code_file": "k16_pisa_weighted_ladder_frontier.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}
