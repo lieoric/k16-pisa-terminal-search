@@ -1,5 +1,10 @@
 # K16 Pisa tournament terminal search
 
+The current proof/computation ledger is
+[`docs/k16-progress-ledger-2026-07-28.md`](docs/k16-progress-ledger-2026-07-28.md).
+It separates theorem-level results, exact solver closures, heuristic evidence,
+and still-open regions, and includes the completed `h13_p00=(4,1^12)` closure.
+
 ## Current phase: exact weighted quotient ladder (h=10..15)
 
 The independent audit has exhaustively closed weighted quotient orders
