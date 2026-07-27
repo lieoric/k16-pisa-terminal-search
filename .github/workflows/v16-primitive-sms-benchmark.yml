@@ -1,4 +1,4 @@
-name: K16 v16 primitive SMS benchmark
+name: K16 v16 primitive SMS 5h formal
 
 on:
   pull_request:
@@ -12,25 +12,25 @@ on:
   workflow_dispatch:
     inputs:
       solve_seconds:
-        description: SMS search time for each lane/box benchmark
+        description: SMS search time for each exact full-S16 box
         required: true
-        default: "300"
+        default: "18000"
 
 permissions:
   contents: read
 
 concurrency:
-  group: k16-v16-primitive-sms-benchmark
+  group: k16-v16-primitive-sms-formal
   cancel-in-progress: false
 
 env:
   PYTHONUNBUFFERED: "1"
   SMS_COMMIT: 464f12f1fd36b496e7ba9dcbb622b079de02dce4
-  SOLVE_SECONDS: ${{ inputs.solve_seconds || '300' }}
+  SOLVE_SECONDS: ${{ inputs.solve_seconds || '18000' }}
 
 jobs:
   gate-build-plan:
-    name: Exhaustive gates, pinned SMS, and 9-way benchmark plan
+    name: Exhaustive gates, pinned SMS, and full 9-box plan
     runs-on: ubuntu-latest
     timeout-minutes: 35
     outputs:
@@ -87,11 +87,11 @@ jobs:
             --output gates/sms-gates.json \
             2>&1 | tee gates/sms-gates.log
       - id: plan
-        name: Emit three lanes by three representative boxes
+        name: Emit all nine disjoint full-S16 boxes
         shell: bash
         run: |
           echo "matrix=$(python scripts/k16_primitive_sms.py \
-            --matrix benchmark)" >> "$GITHUB_OUTPUT"
+            --matrix formal --lane full_s16)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: v16-primitive-sms-binary-and-gates
@@ -101,10 +101,10 @@ jobs:
           retention-days: 90
 
   benchmark:
-    name: V16 ${{ matrix.slice_id }}
+    name: V16 5h ${{ matrix.slice_id }}
     needs: gate-build-plan
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 330
     strategy:
       fail-fast: false
       max-parallel: 9
@@ -120,7 +120,7 @@ jobs:
         with:
           name: v16-primitive-sms-binary-and-gates
           path: prepared
-      - name: Solve one primitive lane/box benchmark
+      - name: Solve one exact primitive box for up to five hours
         shell: bash
         run: |
           set -o pipefail
@@ -169,7 +169,7 @@ jobs:
                       f"`{r.get('verified')}`"
                   )
               elif r["status"] == "UNKNOWN":
-                  print("- no exclusion claimed; this benchmark remains open")
+                  print("- no exclusion claimed; this exact box remains open")
           PY
       - uses: actions/upload-artifact@v4
         if: always()
@@ -204,7 +204,7 @@ jobs:
           PY
 
   aggregate:
-    name: Compare primitive labelling lanes
+    name: Aggregate all nine exact primitive boxes
     needs: benchmark
     if: always()
     runs-on: ubuntu-latest
@@ -257,7 +257,7 @@ jobs:
               r["box"] for r in records if r["status"] == "UNSAT"
           })
           ledger = {
-              "schema": "k16-primitive-sms-benchmark-ledger-v1",
+              "schema": "k16-primitive-sms-formal-ledger-v1",
               "created_utc": datetime.now(timezone.utc).isoformat(),
               "expected_records": 9,
               "observed_records": len(records),
@@ -267,7 +267,16 @@ jobs:
               "logical_conclusion": (
                   "SAT_K16_VERIFIED"
                   if verified_sat
-                  else "BENCHMARK_ONLY"
+                  else (
+                      "UNSAT_PRIMITIVE_K16"
+                      if len(records) == 9
+                      and all(r["status"] == "UNSAT" for r in records)
+                      else (
+                          "PRIMITIVE_K16_OPEN"
+                          if any(r["status"] == "UNKNOWN" for r in records)
+                          else "INCOMPLETE"
+                      )
+                  )
               ),
               "records": records,
           }
@@ -277,7 +286,7 @@ jobs:
           )
           print(json.dumps(ledger, indent=2))
           with Path(__import__("os").environ["GITHUB_STEP_SUMMARY"]).open("a") as out:
-              print("## v16 primitive lane benchmark", file=out)
+              print("## v16 primitive full-S16 formal campaign", file=out)
               print(f"\n- returned: `{len(records)}/9`", file=out)
               print(f"- verified SAT: `{verified_sat}`", file=out)
               print(f"- exact closed boxes: `{closed_boxes}`", file=out)
