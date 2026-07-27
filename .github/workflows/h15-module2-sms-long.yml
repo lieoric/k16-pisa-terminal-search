@@ -1,6 +1,13 @@
 name: K16 h15 module-2 SMS long campaign
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/h15-module2-sms-long.yml"
+      - "scripts/h15_module2_sms.py"
+      - "scripts/h14_module3_sms.py"
+      - "pisa_verify.py"
+      - "requirements-sat.txt"
   workflow_dispatch:
     inputs:
       solve_seconds:
