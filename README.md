@@ -520,3 +520,24 @@ consequence recorded here is one-way: a K16 Pisa witness has no module of size
 at least 8. It is not a proof that K16 has no witness, and it does not claim the
 converse about module size. The archived evidence is in
 `evidence/weighted-quotient-audit-kaggle-20260727.json`.
+
+## h15 module-2 SMS campaign
+
+After the exact h14 closure, the only remaining decomposable target is
+`h15_p00=(2,1^14)`.  The dedicated workflow keeps the unique weight-two
+class fixed and gives SAT Modulo Symmetries the complete colour partition
+`1+14`.  It divides the target into fifteen disjoint and exhaustive slices:
+heavy outdegrees 1 through 13, with the two possible central degrees 6 and 7
+split once more by whether the heavy class has zero weighted margin.
+
+The implementation, workflow, and proof-of-coverage notes are:
+
+- `scripts/h15_module2_sms.py`;
+- `.github/workflows/h15-module2-sms-long.yml`;
+- `docs/H15_MODULE2_SMS_CAMPAIGN.md`.
+
+Each long slice receives 19,200 continuous solver seconds.  Every `UNSAT`
+result is permanent; every timeout remains `UNKNOWN`; and every SAT result
+must survive the independent transitive-fibre expansion and K16 verifier.
+All fifteen slices `UNSAT` would close every decomposable K16 Pisa witness,
+leaving only the primitive case.

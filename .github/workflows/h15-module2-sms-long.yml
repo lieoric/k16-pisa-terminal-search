@@ -1,0 +1,275 @@
+name: K16 h15 module-2 SMS long campaign
+
+on:
+  workflow_dispatch:
+    inputs:
+      solve_seconds:
+        description: Continuous SMS time for each exact h15 slice
+        required: true
+        default: "19200"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k16-h15-module2-sms-long
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  SMS_COMMIT: 464f12f1fd36b496e7ba9dcbb622b079de02dce4
+  SOLVE_SECONDS: ${{ inputs.solve_seconds || '19200' }}
+
+jobs:
+  gate-build-plan:
+    name: Gates, pinned SMS build, and exact 15-way plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install exact-search dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements-sat.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential cmake libboost-graph-dev \
+            libboost-program-options-dev
+      - name: Run independent positive, negative, equivalence, and coverage gates
+        run: |
+          set -o pipefail
+          mkdir -p gates
+          python scripts/h15_module2_sms.py \
+            --gates --output gates/gates.json \
+            2>&1 | tee gates/gates.log
+      - name: Build pinned SAT Modulo Symmetries
+        run: |
+          git clone --recursive \
+            https://github.com/markirch/sat-modulo-symmetries.git \
+            tools/sms
+          git -C tools/sms checkout "$SMS_COMMIT"
+          git -C tools/sms submodule update --init --recursive
+          (
+            cd tools/sms/cadical_sms
+            ./configure -fPIC
+            make -j4
+          )
+          cmake -S tools/sms -B tools/sms/build \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build tools/sms/build -j4
+          test -x tools/sms/build/src/smsg
+          mkdir -p bundle/lib
+          cp tools/sms/build/src/smsg bundle/smsg
+          ldd tools/sms/build/src/smsg | tee gates/smsg-ldd.txt
+          ldd tools/sms/build/src/smsg \
+            | awk '/libboost_/ {print $3}' \
+            | xargs -r -I '{}' cp '{}' bundle/lib/
+          test -n "$(find bundle/lib -maxdepth 1 -name 'libboost_*' -print -quit)"
+      - id: plan
+        name: Emit the complete heavy-degree/zero partition
+        shell: bash
+        run: |
+          echo "matrix=$(python scripts/h15_module2_sms.py \
+            --matrix-json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h15-module2-sms-binary-and-gates
+          path: |
+            bundle/
+            gates/
+          retention-days: 90
+
+  solve:
+    name: H15 ${{ matrix.slice_id }}
+    needs: gate-build-plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 15
+      matrix: ${{ fromJSON(needs.gate-build-plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: h15-module2-sms-binary-and-gates
+          path: prepared
+      - name: Solve one exact colour-symmetric h15 slice
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x prepared/bundle/smsg
+          export LD_LIBRARY_PATH="$PWD/prepared/bundle/lib:${LD_LIBRARY_PATH:-}"
+          mkdir -p cnf results logs
+          python scripts/h15_module2_sms.py \
+            --solve \
+            --degree "${{ matrix.degree }}" \
+            --heavy-zero "${{ matrix.heavy_zero }}" \
+            --binary prepared/bundle/smsg \
+            --seconds "$SOLVE_SECONDS" \
+            --cnf "cnf/${{ matrix.slice_id }}.cnf" \
+            --result "results/${{ matrix.slice_id }}.json" \
+            --log "logs/${{ matrix.slice_id }}.log" \
+            2>&1 | tee "logs/${{ matrix.slice_id }}-wrapper.log"
+      - name: Publish exact logical status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          paths = list(Path("results").glob("*.json"))
+          if not paths:
+              print("## ERROR\n\nNo result JSON was produced.")
+          else:
+              r = json.loads(paths[0].read_text())
+              print(f"## {r['slice_id']}: {r['status']}")
+              print(f"\n- heavy outdegree: `{r['heavy_outdegree']}`")
+              print(f"- heavy zero: `{r['heavy_zero']}`")
+              print(f"- solver seconds: `{r['seconds']}`")
+              print(f"- solver-level exact: `{r['solver_level_exact']}`")
+              if r["status"] == "SAT":
+                  print(f"- independently verified: `{r.get('verified')}`")
+              elif r["status"] == "UNKNOWN":
+                  print("- no exclusion claimed; this slice remains open")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: h15-module2-result-${{ matrix.slice_id }}
+          path: |
+            results/
+            logs/
+            cnf/*.meta.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Make UNKNOWN or ERROR visible
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          paths = list(Path("results").glob("*.json"))
+          if not paths:
+              raise SystemExit("ERROR: no result JSON")
+          r = json.loads(paths[0].read_text())
+          status = r.get("status")
+          if status == "UNKNOWN":
+              raise SystemExit(
+                  "UNKNOWN: exact slice remains open and must be refined"
+              )
+          if status not in {"SAT", "UNSAT"}:
+              raise SystemExit(f"ERROR: unexpected status {status!r}")
+          if status == "SAT" and not r.get("verified", False):
+              raise SystemExit("ERROR: SAT witness did not verify")
+          print(f"Exact logical status: {status}")
+          PY
+
+  aggregate:
+    name: Aggregate exact h15 coverage
+    needs: solve
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: h15-module2-result-*
+          path: downloaded
+          merge-multiple: false
+      - name: Build machine-readable coverage ledger
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          records = []
+          for path in Path("downloaded").rglob("*.json"):
+              if path.name.endswith(".meta.json"):
+                  continue
+              record = json.loads(path.read_text())
+              if record.get("schema") == "k16-h15-module2-sms-result-v1":
+                  records.append(record)
+          records.sort(
+              key=lambda r: (r["heavy_outdegree"], r["heavy_zero"])
+          )
+          expected = [
+              (degree, zero)
+              for degree in range(1, 14)
+              for zero in (
+                  (False, True) if degree in (6, 7) else (False,)
+              )
+          ]
+          observed = [
+              (r["heavy_outdegree"], r["heavy_zero"])
+              for r in records
+          ]
+          statuses = {
+              f"{r['heavy_outdegree']:02d}-z{int(r['heavy_zero'])}":
+              r["status"]
+              for r in records
+          }
+          complete = (
+              observed == expected
+              and all(r["status"] == "UNSAT" for r in records)
+          )
+          sat = [r for r in records if r["status"] == "SAT"]
+          ledger = {
+              "schema": "k16-h15-module2-coverage-v1",
+              "created_utc": datetime.now(timezone.utc).isoformat(),
+              "target": "h15_p00=(2,1^14)",
+              "expected_slices": expected,
+              "observed_slices": observed,
+              "statuses": statuses,
+              "all_slices_unsat": complete,
+              "verified_sat_witnesses": [
+                  r["slice_id"] for r in sat if r.get("verified")
+              ],
+              "logical_conclusion": (
+                  "UNSAT_H15_P00"
+                  if complete
+                  else (
+                      "SAT_H15_P00"
+                      if any(r.get("verified") for r in sat)
+                      else "OPEN"
+                  )
+              ),
+              "records": records,
+          }
+          Path("aggregate").mkdir()
+          Path("aggregate/h15-module2-coverage.json").write_text(
+              json.dumps(ledger, indent=2) + "\n"
+          )
+          summary = Path(__import__("os").environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a") as out:
+              print(
+                  f"## h15_p00: {ledger['logical_conclusion']}",
+                  file=out,
+              )
+              print(
+                  f"\n- returned slices: `{len(records)}/15`",
+                  file=out,
+              )
+              print(f"- statuses: `{statuses}`", file=out)
+          print(json.dumps(ledger, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h15-module2-coverage-ledger
+          path: aggregate/
+          retention-days: 90
