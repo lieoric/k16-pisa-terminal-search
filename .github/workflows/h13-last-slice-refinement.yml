@@ -1,0 +1,444 @@
+name: K16 h13 final-slice semantic refinement
+
+on:
+  workflow_dispatch:
+    inputs:
+      degree_seconds:
+        description: Seconds for each of the six zero-0 degree cubes
+        required: true
+        default: "600"
+      child_seconds:
+        description: Seconds for each (arc(0,2), weighted-outdegree(2)) child
+        required: true
+        default: "120"
+      blocker_seconds:
+        description: Seconds for each unique-blocker outgoing-weight child
+        required: true
+        default: "7200"
+      workers:
+        description: CP-SAT workers per job
+        required: true
+        default: "4"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k16-h13-final-slice-refinement
+  cancel-in-progress: false
+
+env:
+  DEGREE_SECONDS: ${{ inputs.degree_seconds || '600' }}
+  CHILD_SECONDS: ${{ inputs.child_seconds || '120' }}
+  BLOCKER_SECONDS: ${{ inputs.blocker_seconds || '7200' }}
+  WORKERS: ${{ inputs.workers || '4' }}
+
+jobs:
+  gate-and-plan:
+    name: Verify six-way semantic partition
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - id: plan
+        shell: bash
+        run: |
+          echo "matrix=$(python scripts/h13_last_slice_refinement.py \
+            --stage1-matrix)" >> "$GITHUB_OUTPUT"
+      - name: Run coverage, model, and child-execution gates
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p gates
+          python scripts/h13_last_slice_refinement.py \
+            --gates --seconds 5 --workers "$WORKERS" \
+            --output gates/gates.json 2>&1 | tee gates/gates.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: h13-last-slice-gates
+          path: gates/
+          retention-days: 90
+
+  degree-cubes:
+    name: D ${{ matrix.cube_id }} / b0=${{ matrix.b0 }}
+    needs: gate-and-plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.gate-and-plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Solve exact zero-0 degree cube
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python scripts/h13_last_slice_refinement.py \
+            --solve --d0 "${{ matrix.d0 }}" \
+            --seconds "$DEGREE_SECONDS" --workers "$WORKERS" \
+            --output results/result.json \
+            2>&1 | tee "logs/${{ matrix.cube_id }}.log"
+      - name: Publish exact status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          path = Path("results/result.json")
+          if not path.exists():
+              print("## ERROR\n\nNo result JSON was produced.")
+          else:
+              r = json.loads(path.read_text())
+              print(f"## {r['slice_id']}: {r['status']}")
+              print(f"\n- d0/b0: `{r['zero0_outdegree']}/{r['zero0_blocker_count']}`")
+              print(f"- wall seconds: `{r['wall_seconds']}`")
+              print(f"- branches/conflicts: `{r['branches']}/{r['conflicts']}`")
+              if r["status"] == "UNKNOWN":
+                  print("- will be partitioned by arc(0,2)")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: h13-last-slice-degree-${{ matrix.d0 }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Make UNKNOWN or ERROR visible
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("results/result.json")
+          if not path.exists():
+              raise SystemExit("ERROR: no result JSON")
+          status = json.loads(path.read_text()).get("status")
+          if status == "UNKNOWN":
+              raise SystemExit("UNKNOWN: queued for arc(0,2) refinement")
+          if status == "ERROR":
+              raise SystemExit("ERROR: solver/model failure")
+          print(f"Exact logical status: {status}")
+          PY
+
+  refine-plan:
+    name: Split only UNKNOWN degree cubes by zero-2 invariants
+    needs: degree-cubes
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: h13-last-slice-degree-*
+          path: downloaded
+          merge-multiple: false
+      - id: plan
+        shell: bash
+        run: |
+          mkdir -p plan
+          python scripts/h13_last_slice_refinement.py \
+            --refine-plan downloaded --output plan/refine-plan.json
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          plan = json.loads(Path("plan/refine-plan.json").read_text())
+          rows = plan["matrix"]
+          if not rows:
+              rows = [{
+                  "skip": True,
+                  "d0": 1,
+                  "b0": 10,
+                  "arc02": 1,
+                  "outweight2": 1,
+                  "cube_id": "none",
+              }]
+          else:
+              for row in rows:
+                  row["skip"] = False
+          payload = json.dumps({"include": rows}, separators=(",", ":"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              print(f"matrix={payload}", file=out)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: h13-last-slice-refine-plan
+          path: plan/
+          retention-days: 90
+
+  semantic-children:
+    name: A ${{ matrix.cube_id }}
+    needs: refine-plan
+    if: always() && needs.refine-plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix: ${{ fromJSON(needs.refine-plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        if: matrix.skip != true
+      - uses: actions/setup-python@v5
+        if: matrix.skip != true
+        with:
+          python-version: "3.12"
+          cache: pip
+      - if: matrix.skip != true
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Solve exact arc(0,2) child
+        if: matrix.skip != true
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python scripts/h13_last_slice_refinement.py \
+            --solve --d0 "${{ matrix.d0 }}" \
+            --arc02 "${{ matrix.arc02 }}" \
+            --outweight2 "${{ matrix.outweight2 }}" \
+            --seconds "$CHILD_SECONDS" --workers "$WORKERS" \
+            --output results/result.json \
+            2>&1 | tee "logs/${{ matrix.cube_id }}.log"
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.skip != true
+        with:
+          name: h13-last-child-d${{ matrix.d0 }}-a${{ matrix.arc02 }}-w${{ matrix.outweight2 }}
+          path: |
+            results/
+            logs/
+          retention-days: 90
+      - name: Make UNKNOWN or ERROR visible
+        if: always() && matrix.skip != true
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("results/result.json")
+          if not path.exists():
+              raise SystemExit("ERROR: no result JSON")
+          r = json.loads(path.read_text())
+          print(f"{r['slice_id']}: {r['status']}")
+          if r["status"] in {"UNKNOWN", "ERROR"}:
+              raise SystemExit(f"{r['status']}: exact refined slice remains open")
+          PY
+
+  blocker-plan:
+    name: Split only hard w2=7 children by unique blocker outweight
+    needs: semantic-children
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: h13-last-child-*
+          path: downloaded
+          merge-multiple: false
+      - id: plan
+        shell: bash
+        run: |
+          mkdir -p plan
+          python scripts/h13_last_slice_refinement.py \
+            --blocker-plan downloaded --output plan/blocker-plan.json
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          plan = json.loads(Path("plan/blocker-plan.json").read_text())
+          if plan["error_or_unsplit_stage2"]:
+              raise SystemExit(
+                  "unsafe/incomplete stage2 split: "
+                  + repr(plan["error_or_unsplit_stage2"])
+              )
+          rows = plan["matrix"]
+          if not rows:
+              rows = [{
+                  "skip": True,
+                  "d0": 6,
+                  "b0": 0,
+                  "arc02": 1,
+                  "outweight2": 7,
+                  "blocker_outweight": 8,
+                  "cube_id": "none",
+              }]
+          else:
+              for row in rows:
+                  row["skip"] = False
+          payload = json.dumps({"include": rows}, separators=(",", ":"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              print(f"matrix={payload}", file=out)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: h13-last-slice-blocker-plan
+          path: plan/
+          retention-days: 90
+
+  blocker-cubes:
+    name: B ${{ matrix.cube_id }}
+    needs: blocker-plan
+    if: always() && needs.blocker-plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    strategy:
+      fail-fast: false
+      max-parallel: 14
+      matrix: ${{ fromJSON(needs.blocker-plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        if: matrix.skip != true
+      - uses: actions/setup-python@v5
+        if: matrix.skip != true
+        with:
+          python-version: "3.12"
+          cache: pip
+      - if: matrix.skip != true
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Solve exact unique-blocker outgoing-weight child
+        if: matrix.skip != true
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python scripts/h13_last_slice_refinement.py \
+            --solve --d0 "${{ matrix.d0 }}" \
+            --arc02 "${{ matrix.arc02 }}" \
+            --outweight2 "${{ matrix.outweight2 }}" \
+            --blocker2-outweight "${{ matrix.blocker_outweight }}" \
+            --seconds "$BLOCKER_SECONDS" --workers "$WORKERS" \
+            --output results/result.json \
+            2>&1 | tee "logs/${{ matrix.cube_id }}.log"
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.skip != true
+        with:
+          name: h13-last-blocker-d${{ matrix.d0 }}-a${{ matrix.arc02 }}-w${{ matrix.outweight2 }}-k${{ matrix.blocker_outweight }}
+          path: |
+            results/
+            logs/
+          retention-days: 90
+      - name: Make UNKNOWN or ERROR visible
+        if: always() && matrix.skip != true
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("results/result.json")
+          if not path.exists():
+              raise SystemExit("ERROR: no result JSON")
+          r = json.loads(path.read_text())
+          print(f"{r['slice_id']}: {r['status']}")
+          if r["status"] in {"UNKNOWN", "ERROR"}:
+              raise SystemExit(f"{r['status']}: exact blocker slice remains open")
+          PY
+
+  aggregate:
+    name: Accumulate exact closure of the final h13 slice
+    needs:
+      - degree-cubes
+      - refine-plan
+      - semantic-children
+      - blocker-plan
+      - blocker-cubes
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: h13-last-*
+          path: downloaded
+          merge-multiple: false
+      - name: Aggregate exact statuses
+        shell: bash
+        run: |
+          mkdir -p aggregate
+          python scripts/h13_last_slice_refinement.py \
+            --aggregate downloaded --output aggregate/summary.json \
+            2>&1 | tee aggregate/aggregate.log
+      - name: Publish campaign summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          path = Path("aggregate/summary.json")
+          if not path.exists():
+              print("## Aggregate failed")
+          else:
+              r = json.loads(path.read_text())
+              print(f"## h13 last slice: {r['status']}")
+              print(
+                  f"\n- degree cubes closed: "
+                  f"`{r['degree_cubes_closed']}/{r['degree_cubes_total']}`"
+              )
+              print(f"- open refined slices: `{r['open_refined_slices']}`")
+              print(f"- missing slices: `{r['missing_slices']}`")
+              print(f"- SAT slices: `{r['sat_slices']}`")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: h13-last-slice-aggregate
+          path: aggregate/
+          retention-days: 90
+      - name: Make incomplete campaign visible
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("aggregate/summary.json")
+          if not path.exists():
+              raise SystemExit("ERROR: aggregate summary missing")
+          status = json.loads(path.read_text()).get("status")
+          if status == "INCOMPLETE":
+              raise SystemExit("INCOMPLETE: exact open slices remain")
+          print(f"Final logical status: {status}")
+          PY
