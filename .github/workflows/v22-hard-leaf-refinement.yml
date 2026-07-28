@@ -8,6 +8,11 @@ on:
         required: true
         default: "30353707059"
         type: string
+  pull_request:
+    paths:
+      - ".github/workflows/v22-hard-leaf-refinement.yml"
+      - "scripts/k16_v22_refine.py"
+      - "docs/V22_TWO_FRONT_CAMPAIGN.md"
 
 permissions:
   actions: read
@@ -19,7 +24,7 @@ concurrency:
 
 env:
   PYTHONUNBUFFERED: "1"
-  V21_RUN_ID: ${{ inputs.v21_run_id }}
+  V21_RUN_ID: ${{ inputs.v21_run_id || '30353707059' }}
 
 jobs:
   plan:

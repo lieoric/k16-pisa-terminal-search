@@ -13,6 +13,12 @@ on:
         required: true
         default: "24"
         type: string
+  pull_request:
+    paths:
+      - ".github/workflows/v22-seven-root-atlas.yml"
+      - "scripts/k16_v22_atlas.py"
+      - "scripts/k16_smart_cubing.py"
+      - "docs/V22_TWO_FRONT_CAMPAIGN.md"
 
 permissions:
   actions: read
@@ -24,8 +30,8 @@ concurrency:
 
 env:
   PYTHONUNBUFFERED: "1"
-  V21_RUN_ID: ${{ inputs.v21_run_id }}
-  SAMPLE_SIZE: ${{ inputs.sample_size }}
+  V21_RUN_ID: ${{ inputs.v21_run_id || '30353707059' }}
+  SAMPLE_SIZE: ${{ inputs.sample_size || '24' }}
 
 jobs:
   partition:
