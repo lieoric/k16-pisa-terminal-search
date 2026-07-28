@@ -170,8 +170,10 @@ jobs:
               if r["status"] == "UNKNOWN":
                   print("- advances to the 90-minute SMS stage")
           PY
-      - uses: actions/upload-artifact@v4
+      - id: upload-cadical
+        uses: actions/upload-artifact@v4
         if: always()
+        continue-on-error: true
         with:
           name: v22-refine-cadical-${{ matrix.task_id }}
           path: |
@@ -179,6 +181,18 @@ jobs:
             logs/
           if-no-files-found: warn
           retention-days: 90
+      - id: retry-upload-cadical
+        name: Retry CaDiCaL artifact upload after a transient failure
+        uses: actions/upload-artifact@v4
+        if: always() && steps.upload-cadical.outcome == 'failure'
+        with:
+          name: v22-refine-cadical-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
 
   select-sms:
     name: Send only refined CaDiCaL UNKNOWN children to SMS
@@ -273,8 +287,10 @@ jobs:
             --result "results/${{ matrix.task_id }}.json" \
             --log "logs/${{ matrix.task_id }}.log" \
             2>&1 | tee "logs/${{ matrix.task_id }}-wrapper.log"
-      - uses: actions/upload-artifact@v4
+      - id: upload-sms
+        uses: actions/upload-artifact@v4
         if: always()
+        continue-on-error: true
         with:
           name: v22-refine-sms-${{ matrix.task_id }}
           path: |
@@ -282,6 +298,18 @@ jobs:
             logs/
           if-no-files-found: warn
           retention-days: 90
+      - id: retry-upload-sms
+        name: Retry SMS artifact upload after a transient failure
+        uses: actions/upload-artifact@v4
+        if: always() && steps.upload-sms.outcome == 'failure'
+        with:
+          name: v22-refine-sms-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
 
   aggregate:
     name: Publish the resumable V22 refinement ledger
