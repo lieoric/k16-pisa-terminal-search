@@ -1,0 +1,389 @@
+name: K16 v20 staged CaDiCaL to SMS cascade
+
+on:
+  workflow_dispatch:
+    inputs:
+      resume_run_id:
+        description: "Optional completed V20 run ID whose exact ledger should be resumed"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: k16-v20-staged-cascade
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  V18_RUN_ID: "30332755449"
+  V19_RUN_ID: "30336126553"
+
+jobs:
+  plan:
+    name: Remove prior closures and build the CaDiCaL 12-minute matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download the complete V18 source
+        uses: actions/download-artifact@v4
+        with:
+          name: v18-smart-deepen-source
+          path: prior/v18-source
+          run-id: ${{ env.V18_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download the final V18 ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v18-smart-deepen-ledger
+          path: prior/v18-ledger
+          run-id: ${{ env.V18_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download the final V19 strategy ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v19-strategy-pilot-ledger
+          path: prior/v19-ledger
+          run-id: ${{ env.V19_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Reuse the pinned CaDiCaL 3.0.1 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: v19-cadical-3.0.1
+          path: prior/cadical
+          run-id: ${{ env.V19_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download an optional completed V20 resume ledger
+        if: ${{ inputs.resume_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: v20-cascade-ledger
+          path: prior/v20-resume
+          run-id: ${{ inputs.resume_run_id }}
+          github-token: ${{ github.token }}
+      - id: matrix
+        name: Build the exact remaining-leaf matrix
+        shell: bash
+        run: |
+          set -o pipefail
+          v18_ledger="$(find prior/v18-ledger -name \
+            'v18-smart-deepen-ledger.json' -type f -print -quit)"
+          v19_ledger="$(find prior/v19-ledger -name \
+            'v19-strategy-pilot-ledger.json' -type f -print -quit)"
+          test -n "$v18_ledger"
+          test -n "$v19_ledger"
+          resume_args=()
+          if [[ -n "${{ inputs.resume_run_id }}" ]]; then
+            resume_ledger="$(find prior/v20-resume -name \
+              'v20-cascade-ledger.json' -type f -print -quit)"
+            test -n "$resume_ledger"
+            resume_args=(--resume-ledger "$resume_ledger")
+          fi
+          python scripts/k16_staged_cascade.py \
+            --plan \
+            --v18-source prior/v18-source \
+            --v18-ledger "$v18_ledger" \
+            --v19-ledger "$v19_ledger" \
+            --cadical-source prior/cadical \
+            "${resume_args[@]}" \
+            --v18-run-id "$V18_RUN_ID" \
+            --v19-run-id "$V19_RUN_ID" \
+            --output v20-source \
+            --matrix-output v20-cadical-matrix.json \
+            | tee v20-plan.log
+          matrix="$(tr -d '\n' < v20-cadical-matrix.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v20-cadical-matrix.json"))["include"]))')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(Path("v20-source/v20-manifest.json").read_text())
+          b = r["baseline"]
+          print("## V20 staged cascade plan")
+          print(f"\n- V18 UNKNOWN leaves: `{b['v18_unknown_leaves']}`")
+          print(f"- prior exact closure union: `{b['prior_exact_closed_union']}`")
+          print(f"- CaDiCaL 12-minute tasks: `{b['open_before_cadical']}`")
+          print(
+              "\nOnly leaves absent from the exact closure ledger are scheduled."
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v20-cascade-source
+          path: v20-source/
+          if-no-files-found: error
+          retention-days: 90
+
+  cadical:
+    name: ${{ matrix.task_id }}
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: v20-cascade-source
+          path: source
+      - name: Run one CaDiCaL leaf with early SAT or UNSAT exit
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x source/cadical/cadical
+          mkdir -p results logs
+          python scripts/k16_staged_cascade.py \
+            --solve \
+            --source source \
+            --manifest source/v20-manifest.json \
+            --task-id "${{ matrix.task_id }}" \
+            --result "results/${{ matrix.task_id }}.json" \
+            --log "logs/${{ matrix.task_id }}.log" \
+            --output results/unused.json \
+            2>&1 | tee "logs/${{ matrix.task_id }}-wrapper.log"
+      - name: Publish logical status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          paths = list(Path("results").glob("*.json"))
+          if not paths:
+              print("## Infrastructure error\n\nNo signed result.")
+          else:
+              r = json.loads(paths[0].read_text())
+              print(f"## {r['task_id']}: {r['status']}")
+              print(f"\n- seconds: `{r['seconds']}` / `{r['time_limit_seconds']}`")
+              print(f"- exact UNSAT closure: `{r['solver_level_exact']}`")
+              if r["status"] == "UNKNOWN":
+                  print("- UNKNOWN remains open and advances to SMS")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v20-cadical-result-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+
+  select-sms:
+    name: Delete CaDiCaL closures and build the SMS 15-minute matrix
+    needs:
+      - plan
+      - cadical
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: v20-cascade-source
+          path: source
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.count != '0'
+        with:
+          pattern: v20-cadical-result-*
+          path: cadical-results
+      - id: matrix
+        name: Pass only UNKNOWN leaves to SMS
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p cadical-results
+          python scripts/k16_staged_cascade.py \
+            --select-sms \
+            --source source \
+            --cadical-results-root cadical-results \
+            --output v20-stage \
+            --matrix-output v20-sms-matrix.json \
+            | tee v20-select-sms.log
+          matrix="$(tr -d '\n' < v20-sms-matrix.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v20-sms-matrix.json"))["include"]))')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(
+              Path("v20-stage/v20-cadical-stage-ledger.json").read_text()
+          )
+          print("## V20 CaDiCaL stage")
+          print(f"\n- statuses: `{r['statuses']}`")
+          print(f"- exact closures: `{len(r['exact_closed_queue_ids'])}`")
+          print(f"- SMS tasks created: `{len(r['unknown_queue_ids'])}`")
+          print("\nSAT and UNSAT leaves are not resubmitted.")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v20-cadical-stage
+          path: v20-stage/
+          if-no-files-found: error
+          retention-days: 90
+
+  sms:
+    name: ${{ matrix.task_id }}
+    needs: select-sms
+    if: needs.select-sms.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.select-sms.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: v20-cascade-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          name: v20-cadical-stage
+          path: stage
+      - name: Run one SMS leaf with early SAT or UNSAT exit
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x source/bundle/smsg
+          export LD_LIBRARY_PATH="$PWD/source/bundle/lib:${LD_LIBRARY_PATH:-}"
+          mkdir -p results logs
+          python scripts/k16_staged_cascade.py \
+            --solve \
+            --source source \
+            --manifest stage/v20-sms-manifest.json \
+            --task-id "${{ matrix.task_id }}" \
+            --result "results/${{ matrix.task_id }}.json" \
+            --log "logs/${{ matrix.task_id }}.log" \
+            --output results/unused.json \
+            2>&1 | tee "logs/${{ matrix.task_id }}-wrapper.log"
+      - name: Publish logical status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          paths = list(Path("results").glob("*.json"))
+          if not paths:
+              print("## Infrastructure error\n\nNo signed result.")
+          else:
+              r = json.loads(paths[0].read_text())
+              print(f"## {r['task_id']}: {r['status']}")
+              print(f"\n- seconds: `{r['seconds']}` / `{r['time_limit_seconds']}`")
+              print(f"- exact UNSAT closure: `{r['solver_level_exact']}`")
+              if r["status"] == "UNKNOWN":
+                  print("- UNKNOWN remains open")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v20-sms-result-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+
+  aggregate:
+    name: Publish the resumable exact V20 ledger
+    needs:
+      - plan
+      - select-sms
+      - sms
+    if: always() && needs.plan.result == 'success' && needs.select-sms.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: v20-cascade-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          name: v20-cadical-stage
+          path: stage
+      - name: Download SMS results
+        if: needs.select-sms.outputs.count != '0'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v20-sms-result-*
+          path: sms-results
+      - name: Merge only exact closures into the resumable ledger
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p sms-results aggregate
+          python scripts/k16_staged_cascade.py \
+            --aggregate \
+            --source source \
+            --cadical-stage-ledger stage/v20-cadical-stage-ledger.json \
+            --sms-results-root sms-results \
+            --workflow-run-id "${{ github.run_id }}" \
+            --output aggregate/v20-cascade-ledger.json \
+            | tee aggregate/v20-cascade-ledger.log
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(Path("aggregate/v20-cascade-ledger.json").read_text())
+          print("## V20 staged cascade verdict")
+          print(f"\n- conclusion: `{r['logical_conclusion']}`")
+          print(f"- prior exact closures: `{len(r['prior_closed_queue_ids'])}`")
+          print(
+              f"- new CaDiCaL closures: "
+              f"`{r['cadical_stage']['new_exact_closures']}`"
+          )
+          print(
+              f"- new SMS closures: `{r['sms_stage']['new_exact_closures']}`"
+          )
+          print(f"- total closed V18 UNKNOWN leaves: `{r['closed_count']}` / 139")
+          print(f"- remaining open leaves: `{r['open_count']}`")
+          print("\nUNKNOWN is not an exclusion. This ledger can seed a resume run.")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v20-cascade-ledger
+          path: aggregate/
+          if-no-files-found: error
+          retention-days: 90
