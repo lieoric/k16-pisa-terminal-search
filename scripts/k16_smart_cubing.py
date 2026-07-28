@@ -44,6 +44,10 @@ from k16_primitive_sms import (
     build_cnf,
     independent_audit,
 )
+from k16_theorem_cuts import (
+    MODEL_VERSION as THEOREM_MODEL_VERSION,
+    build_theorem_cnf,
+)
 
 
 MODEL_VERSION = "k16-pisa-v17.1-sms-aware-smart-cubing-pilot-20260728"
@@ -167,8 +171,14 @@ def read_cube(path: Path, line_number: int) -> list[int]:
 
 
 def stratified_lines(total: int, wanted: int) -> list[int]:
+    if total < 0 or wanted < 0:
+        raise ValueError("stratified sample sizes must be non-negative")
+    if total == 0 or wanted == 0:
+        return []
     if total <= wanted:
         return list(range(1, total + 1))
+    if wanted == 1:
+        return [1 + (total - 1) // 2]
     return sorted({
         1 + round(position * (total - 1) / (wanted - 1))
         for position in range(wanted)
@@ -223,6 +233,7 @@ def prepare_box(
     partition_seconds: int,
     coverage_seconds: int,
     strategies: tuple[str, ...],
+    theorem_cuts: bool = False,
 ) -> dict:
     if box not in BOXES:
         raise ValueError(box)
@@ -234,7 +245,11 @@ def prepare_box(
     logs.mkdir(exist_ok=True)
     lane = LANES["full_s16"]
 
-    built = build_cnf(lane=lane, box=box)
+    built = (
+        build_theorem_cnf(n=N, lane=lane, box=box)
+        if theorem_cuts
+        else build_cnf(lane=lane, box=box)
+    )
     base = work / "base.cnf"
     enriched = work / "enriched.cnf"
     built.cnf.to_file(base)
@@ -260,7 +275,10 @@ def prepare_box(
     record: dict = {
         "schema": "k16-smart-cubing-partition-v1",
         "model_version": MODEL_VERSION,
-        "root_model_version": ROOT_MODEL_VERSION,
+        "root_model_version": (
+            THEOREM_MODEL_VERSION if theorem_cuts else ROOT_MODEL_VERSION
+        ),
+        "theorem_cuts": theorem_cuts,
         "sms_commit": SMS_COMMIT,
         "sms_patch": PATCH_ID,
         "created_utc": utc_now(),
@@ -629,6 +647,11 @@ def main() -> None:
     parser.add_argument("--cutoff", type=int, default=32)
     parser.add_argument("--partition-seconds", type=int, default=900)
     parser.add_argument("--coverage-seconds", type=int, default=600)
+    parser.add_argument(
+        "--theorem-cuts",
+        action="store_true",
+        help="append the audited V21 lossless theorem clauses before cubing",
+    )
     parser.add_argument("--cube-line", type=int)
     parser.add_argument("--cube-seconds", type=int, default=300)
     parser.add_argument("--sample-size", type=int, default=16)
@@ -655,6 +678,7 @@ def main() -> None:
                 for item in args.strategies.split(",")
                 if item.strip()
             ),
+            theorem_cuts=args.theorem_cuts,
         )
         return
     if args.matrix:

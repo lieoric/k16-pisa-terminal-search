@@ -1,0 +1,428 @@
+name: K16 v22 seven-root exact atlas
+
+on:
+  workflow_dispatch:
+    inputs:
+      v21_run_id:
+        description: "V21 run supplying the audited SMS and CaDiCaL binaries"
+        required: true
+        default: "30353707059"
+        type: string
+      sample_size:
+        description: "Stratified leaves searched per complete root partition"
+        required: true
+        default: "24"
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: k16-v22-seven-root-atlas
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  V21_RUN_ID: ${{ inputs.v21_run_id }}
+  SAMPLE_SIZE: ${{ inputs.sample_size }}
+
+jobs:
+  partition:
+    name: Partition full_s16-${{ matrix.box }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 7
+      matrix:
+        box:
+          - a0_z2
+          - a0_z3
+          - a0_z4p
+          - a1_z2
+          - a1_z4p
+          - a2p_z2
+          - a2p_z3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Reuse the audited V21 solver bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: v21-theorem-source
+          path: solver
+          run-id: ${{ env.V21_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Build an exactly covered theorem-strengthened partition
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x solver/bundle/smsg
+          export LD_LIBRARY_PATH="$PWD/solver/bundle/lib:${LD_LIBRARY_PATH:-}"
+          mkdir -p "prepared/${{ matrix.box }}"
+          python scripts/k16_smart_cubing.py \
+            --prepare \
+            --theorem-cuts \
+            --binary solver/bundle/smsg \
+            --box "${{ matrix.box }}" \
+            --work "prepared/${{ matrix.box }}" \
+            --prerun-seconds 900 \
+            --cuber-prerun-seconds 30 \
+            --cutoff 32 \
+            --partition-seconds 900 \
+            --coverage-seconds 900 \
+            --strategies lookahead \
+            2>&1 | tee "prepared/${{ matrix.box }}/wrapper.log"
+      - name: Publish partition status
+        if: always()
+        shell: bash
+        env:
+          BOX: ${{ matrix.box }}
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+          from pathlib import Path
+
+          box = os.environ["BOX"]
+          path = Path("prepared") / box / "manifest.json"
+          if not path.exists():
+              print(f"## {box}: infrastructure failure")
+          else:
+              r = json.loads(path.read_text())
+              print(f"## {box}: {r['root_status']}")
+              if r["root_status"] == "PARTITIONED":
+                  p = r["partitions"]["lookahead"]
+                  print(f"\n- complete cubes: `{p['cubes']}`")
+                  print(f"- coverage: `{p['coverage']['status']}`")
+                  print(f"- depth: `{p['decision_depth']}`")
+              print(f"- theorem cuts: `{r.get('theorem_cuts')}`")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v22-atlas-partition-${{ matrix.box }}
+          path: prepared/${{ matrix.box }}/
+          if-no-files-found: error
+          retention-days: 90
+
+  plan:
+    name: Validate seven complete partitions and select the atlas sample
+    needs: partition
+    if: always() && needs.partition.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v22-atlas-partition-*
+          path: partitions
+      - id: matrix
+        shell: bash
+        run: |
+          set -o pipefail
+          args=()
+          for box in \
+            a0_z2 a0_z3 a0_z4p a1_z2 a1_z4p a2p_z2 a2p_z3
+          do
+            manifest="$(find "partitions/v22-atlas-partition-$box" \
+              -name manifest.json -type f -print -quit)"
+            test -n "$manifest"
+            args+=(--partition "$box=$(dirname "$manifest")")
+          done
+          python scripts/k16_v22_atlas.py \
+            --plan \
+            "${args[@]}" \
+            --sample-size "$SAMPLE_SIZE" \
+            --source-run-id "$V21_RUN_ID" \
+            --output v22-atlas-plan \
+            --matrix-output v22-atlas-cadical-matrix.json \
+            | tee v22-atlas-plan.log
+          matrix="$(tr -d '\n' < v22-atlas-cadical-matrix.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v22-atlas-cadical-matrix.json"))["include"]))')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(
+              Path("v22-atlas-plan/v22-atlas-manifest.json").read_text()
+          )
+          print("## V22 seven-root atlas plan")
+          for box, info in r["boxes"].items():
+              print(
+                  f"\n- `{box}`: status `{info['root_status']}`, "
+                  f"cubes `{info.get('partition_cubes', 0)}`, "
+                  f"selected `{info.get('selected_count', 0)}`"
+              )
+          print(f"\nTotal CaDiCaL atlas tasks: `{len(r['cadical_tasks'])}`")
+          print(
+              "\nEvery partition has an exact coverage check. "
+              "Unselected leaves remain explicitly open."
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v22-atlas-plan
+          path: v22-atlas-plan/
+          if-no-files-found: error
+          retention-days: 90
+
+  cadical:
+    name: ${{ matrix.task_id }}
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v21-theorem-source
+          path: solver
+          run-id: ${{ env.V21_RUN_ID }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: v22-atlas-plan
+          path: plan
+      - uses: actions/download-artifact@v4
+        with:
+          name: v22-atlas-partition-${{ matrix.box }}
+          path: prepared
+      - name: Run one 30-minute atlas leaf
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x solver/cadical/cadical
+          mkdir -p results logs
+          python scripts/k16_v22_atlas.py \
+            --solve \
+            --solver-source solver \
+            --prepared prepared \
+            --manifest plan/v22-atlas-manifest.json \
+            --task-id "${{ matrix.task_id }}" \
+            --result "results/${{ matrix.task_id }}.json" \
+            --log "logs/${{ matrix.task_id }}.log" \
+            2>&1 | tee "logs/${{ matrix.task_id }}-wrapper.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v22-atlas-cadical-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+
+  select-sms:
+    name: Send only atlas CaDiCaL UNKNOWN leaves to SMS
+    needs:
+      - plan
+      - cadical
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v22-atlas-plan
+          path: plan
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.count != '0'
+        with:
+          pattern: v22-atlas-cadical-*
+          path: cadical-results
+      - id: matrix
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p cadical-results
+          python scripts/k16_v22_atlas.py \
+            --select-sms \
+            --manifest plan/v22-atlas-manifest.json \
+            --cadical-results-root cadical-results \
+            --output v22-atlas-stage \
+            --matrix-output v22-atlas-sms-matrix.json \
+            | tee v22-atlas-select-sms.log
+          matrix="$(tr -d '\n' < v22-atlas-sms-matrix.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v22-atlas-sms-matrix.json"))["include"]))')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v22-atlas-cadical-stage
+          path: v22-atlas-stage/
+          if-no-files-found: error
+          retention-days: 90
+
+  sms:
+    name: ${{ matrix.task_id }}
+    needs: select-sms
+    if: needs.select-sms.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix: ${{ fromJSON(needs.select-sms.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v21-theorem-source
+          path: solver
+          run-id: ${{ env.V21_RUN_ID }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: v22-atlas-cadical-stage
+          path: stage
+      - uses: actions/download-artifact@v4
+        with:
+          name: v22-atlas-partition-${{ matrix.box }}
+          path: prepared
+      - name: Run one 60-minute SMS fallback
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x solver/bundle/smsg
+          export LD_LIBRARY_PATH="$PWD/solver/bundle/lib:${LD_LIBRARY_PATH:-}"
+          mkdir -p results logs
+          python scripts/k16_v22_atlas.py \
+            --solve \
+            --solver-source solver \
+            --prepared prepared \
+            --manifest stage/v22-atlas-sms-manifest.json \
+            --task-id "${{ matrix.task_id }}" \
+            --result "results/${{ matrix.task_id }}.json" \
+            --log "logs/${{ matrix.task_id }}.log" \
+            2>&1 | tee "logs/${{ matrix.task_id }}-wrapper.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v22-atlas-sms-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+
+  aggregate:
+    name: Publish the resumable seven-root atlas ledger
+    needs:
+      - plan
+      - select-sms
+      - sms
+    if: >-
+      always() &&
+      needs.plan.result == 'success' &&
+      needs.select-sms.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v22-atlas-plan
+          path: plan
+      - uses: actions/download-artifact@v4
+        with:
+          name: v22-atlas-cadical-stage
+          path: stage
+      - name: Download SMS results
+        if: needs.select-sms.outputs.count != '0'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v22-atlas-sms-*
+          path: sms-results
+      - name: Merge only exact sampled closures
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p sms-results aggregate
+          python scripts/k16_v22_atlas.py \
+            --aggregate \
+            --plan-manifest plan/v22-atlas-manifest.json \
+            --cadical-ledger stage/v22-atlas-cadical-ledger.json \
+            --sms-results-root sms-results \
+            --workflow-run-id "${{ github.run_id }}" \
+            --output aggregate/v22-atlas-ledger.json \
+            | tee aggregate/v22-atlas-ledger.log
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(Path("aggregate/v22-atlas-ledger.json").read_text())
+          print("## V22 seven-root atlas verdict")
+          print(f"\n- conclusion: `{r['logical_conclusion']}`")
+          print(f"- complete partition leaves: `{r['total_partition_leaves']}`")
+          print(f"- sampled leaves: `{r['sampled_leaves']}`")
+          print(f"- exact sampled closures: `{r['exact_sampled_closures']}`")
+          print(
+              f"- known-open partition leaves: "
+              f"`{r['known_open_partition_leaves']}`"
+          )
+          print(f"- verified SAT: `{len(r['verified_sat_witnesses'])}`")
+          print(
+              "\nUnselected and UNKNOWN leaves remain open; "
+              "no sample is promoted to a whole-root result."
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v22-atlas-ledger
+          path: aggregate/
+          if-no-files-found: error
+          retention-days: 90
