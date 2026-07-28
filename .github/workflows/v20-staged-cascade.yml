@@ -8,6 +8,12 @@ on:
         required: false
         default: ""
         type: string
+  pull_request:
+    paths:
+      - ".github/workflows/v20-staged-cascade.yml"
+      - "scripts/k16_staged_cascade.py"
+      - "scripts/verify_primitive_witness.py"
+      - "docs/V20_STAGED_CASCADE.md"
 
 permissions:
   actions: read
