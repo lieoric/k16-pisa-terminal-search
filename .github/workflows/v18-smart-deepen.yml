@@ -114,10 +114,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: v18-smart-deepen-source
-          path: |
-            v18-source/
-            v18-matrix.json
-            v18-plan.log
+          path: v18-source/
           if-no-files-found: error
           retention-days: 90
 
