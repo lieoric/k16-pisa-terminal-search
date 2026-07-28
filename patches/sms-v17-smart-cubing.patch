@@ -2,31 +2,34 @@ diff --git a/src/cubing.cpp b/src/cubing.cpp
 index 2bd9c7d..ea73b79 100644
 --- a/src/cubing.cpp
 +++ b/src/cubing.cpp
-@@ -548,14 +548,24 @@ void printGame(const vector<vector<int>> &cubeTrail)
+@@ -548,14 +548,29 @@ void printGame(const vector<vector<int>> &cubeTrail)
  
  int GraphSolver::countAssignedOrInactive(const vector<vector<int>> &cubeTrail)
  {
-+    // The lookahead cuber can be restricted to graph-edge variables.  In
-+    // that mode the assignment cutoff must be measured in the same space:
-+    // counting thousands of inactive CNF auxiliaries makes the cutoff fire
-+    // at the root and defeats edge-only cubing.
-+    const int upper =
-+        config.lookaheadOnlyEdgeVars
-+            ? graphHandler->getNumVariables()
-+            : vars();
++    if (config.lookaheadOnlyEdgeVars)
++    {
++        // cubeTrail[0] contains root propagation.  A reusable cube must be
++        // cut on assignments made *after* that root state; otherwise a
++        // strongly constrained graph formula reaches the cutoff before the
++        // first decision and the cuber emits the empty cube.
++        const int edgeVariables = graphHandler->getNumVariables();
++        std::set<int> assignedAfterRoot;
++        for (size_t level = 1; level < cubeTrail.size(); level++)
++            for (auto lit : cubeTrail[level])
++                if (abs(lit) <= edgeVariables)
++                    assignedAfterRoot.insert(abs(lit));
++        return assignedAfterRoot.size();
++    }
++
      int count = 0;
      for (auto lits : cubeTrail)
          for (auto lit : lits)
          {
--            if (active(abs(lit)))
-+            if (abs(lit) <= upper && active(abs(lit)))
+             if (active(abs(lit)))
                  count++;
          }
  
--    count += vars() - active(); // inactive variables
-+    for (int variable = 1; variable <= upper; variable++)
-+        if (!active(variable))
-+            count++;
+     count += vars() - active(); // inactive variables
      return count;
  }
 diff --git a/src/sms.cpp b/src/sms.cpp

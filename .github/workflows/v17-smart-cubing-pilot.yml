@@ -130,7 +130,7 @@ jobs:
             --assignment-cutoff 4 --lookahead-only-edge-vars \
             --cube-only-decisions \
             > gates/cubing-patch.log 2>&1
-          grep -q '^Decisions:' gates/cubing-patch.log
+          grep -Eq '^Decisions:[[:space:]]+-?[0-9]+' gates/cubing-patch.log
           awk '/^Decisions:/ {
             printf "a";
             for (i=2; i<=NF; i++) printf " %s", $i;
@@ -236,6 +236,11 @@ jobs:
       count: ${{ steps.matrix.outputs.count }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements-sat.txt
       - uses: actions/download-artifact@v4
         with:
           pattern: v17-smart-partition-*
@@ -346,6 +351,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements-sat.txt
       - uses: actions/download-artifact@v4
         with:
           pattern: v17-smart-partition-*
@@ -357,6 +367,7 @@ jobs:
       - name: Aggregate without treating UNKNOWN as exclusion
         shell: bash
         run: |
+          mkdir -p downloaded/results
           mapfile -t manifests < <(find downloaded/partitions -name manifest.json -type f | sort)
           mapfile -t results < <(find downloaded/results -name '*.json' -type f | sort)
           args=()

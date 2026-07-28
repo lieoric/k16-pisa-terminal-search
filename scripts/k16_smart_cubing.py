@@ -46,8 +46,8 @@ from k16_primitive_sms import (
 )
 
 
-MODEL_VERSION = "k16-pisa-v17-sms-aware-smart-cubing-pilot-20260728"
-PATCH_ID = "sms-v17-edge-only-cutoff-and-cube-result"
+MODEL_VERSION = "k16-pisa-v17.1-sms-aware-smart-cubing-pilot-20260728"
+PATCH_ID = "sms-v17.1-root-relative-edge-cutoff-and-cube-result"
 ARC_VARIABLES = N * (N - 1)
 DECISIONS = re.compile(r"^Decisions:\s*(.*)$")
 CUBE_RESULT = re.compile(r"Cube result:\s*(0|10|20)")
@@ -347,12 +347,20 @@ def prepare_box(
             encoding="utf-8",
         )
 
+        depths = [len(read_cube(cube_file, line)) for line in range(1, len(cubes) + 1)]
+        has_empty_cube = any(depth == 0 for depth in depths)
         if strategy == "lookahead":
-            generator_complete = not wrapper_timeout and ret == 0 and bool(cubes)
+            generator_complete = (
+                not wrapper_timeout
+                and ret == 0
+                and bool(cubes)
+                and not has_empty_cube
+            )
         else:
             generator_complete = (
                 classify(ret, output, wrapper_timeout) == "UNSAT"
                 and bool(cubes)
+                and not has_empty_cube
             )
 
         coverage = {
@@ -369,7 +377,6 @@ def prepare_box(
                 log=logs / f"{strategy}-coverage.log",
             )
 
-        depths = [len(read_cube(cube_file, line)) for line in range(1, len(cubes) + 1)]
         record["partitions"][strategy] = {
             "strategy": strategy,
             "cutoff": cutoff,
@@ -379,6 +386,7 @@ def prepare_box(
             "returncode": ret,
             "timed_out": wrapper_timeout,
             "generator_complete": generator_complete,
+            "has_empty_cube": has_empty_cube,
             "coverage": coverage,
             "cubes": len(cubes),
             "cube_file": cube_file.name,

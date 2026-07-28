@@ -39,10 +39,14 @@ For each pilot root:
 The SMS patch in `patches/sms-v17-smart-cubing.patch` changes no mathematical
 constraint.  It:
 
-- measures an edge-only lookahead cutoff in the edge-variable space rather
-  than counting inactive auxiliary variables;
+- measures an edge-only lookahead cutoff using edge assignments made after
+  root propagation, rather than counting root-fixed arcs or inactive
+  auxiliary variables;
 - prints the exact result of a cube-assumption call so SAT, UNSAT, and timeout
   cannot be confused.
+
+An empty cube is treated as a degenerate partition and is never scheduled as
+a leaf.
 
 ## Ledger semantics
 
