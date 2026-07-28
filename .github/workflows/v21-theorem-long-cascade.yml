@@ -8,6 +8,13 @@ on:
         required: true
         default: "30339871567"
         type: string
+  pull_request:
+    paths:
+      - ".github/workflows/v21-theorem-long-cascade.yml"
+      - "scripts/k16_theorem_cascade.py"
+      - "scripts/k16_theorem_cuts.py"
+      - "scripts/verify_primitive_witness.py"
+      - "docs/V21_THEOREM_LONG_CASCADE.md"
 
 permissions:
   actions: read
@@ -20,6 +27,7 @@ concurrency:
 env:
   PYTHONUNBUFFERED: "1"
   V18_RUN_ID: "30332755449"
+  V20_RUN_ID: ${{ inputs.v20_run_id || '30339871567' }}
 
 jobs:
   plan:
@@ -50,14 +58,14 @@ jobs:
         with:
           name: v20-cascade-ledger
           path: prior/v20-ledger
-          run-id: ${{ inputs.v20_run_id }}
+          run-id: ${{ env.V20_RUN_ID }}
           github-token: ${{ github.token }}
       - name: Reuse the pinned V20 CaDiCaL binary
         uses: actions/download-artifact@v4
         with:
           name: v20-cascade-source
           path: prior/v20-source
-          run-id: ${{ inputs.v20_run_id }}
+          run-id: ${{ env.V20_RUN_ID }}
           github-token: ${{ github.token }}
       - id: matrix
         name: Build theorem CNFs, run gates, and unit-filter leaves
@@ -73,7 +81,7 @@ jobs:
             --v20-ledger "$v20_ledger" \
             --cadical-source prior/v20-source \
             --v18-run-id "$V18_RUN_ID" \
-            --v20-run-id "${{ inputs.v20_run_id }}" \
+            --v20-run-id "$V20_RUN_ID" \
             --output v21-source \
             --matrix-output v21-cadical-matrix.json \
             | tee v21-plan.log
