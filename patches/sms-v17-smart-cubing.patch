@@ -1,0 +1,57 @@
+diff --git a/src/cubing.cpp b/src/cubing.cpp
+index 2bd9c7d..ea73b79 100644
+--- a/src/cubing.cpp
++++ b/src/cubing.cpp
+@@ -548,14 +548,24 @@ void printGame(const vector<vector<int>> &cubeTrail)
+ 
+ int GraphSolver::countAssignedOrInactive(const vector<vector<int>> &cubeTrail)
+ {
++    // The lookahead cuber can be restricted to graph-edge variables.  In
++    // that mode the assignment cutoff must be measured in the same space:
++    // counting thousands of inactive CNF auxiliaries makes the cutoff fire
++    // at the root and defeats edge-only cubing.
++    const int upper =
++        config.lookaheadOnlyEdgeVars
++            ? graphHandler->getNumVariables()
++            : vars();
+     int count = 0;
+     for (auto lits : cubeTrail)
+         for (auto lit : lits)
+         {
+-            if (active(abs(lit)))
++            if (abs(lit) <= upper && active(abs(lit)))
+                 count++;
+         }
+ 
+-    count += vars() - active(); // inactive variables
++    for (int variable = 1; variable <= upper; variable++)
++        if (!active(variable))
++            count++;
+     return count;
+ }
+diff --git a/src/sms.cpp b/src/sms.cpp
+index f850fd2..0a33b08 100644
+--- a/src/sms.cpp
++++ b/src/sms.cpp
+@@ -281,17 +281,20 @@ int GraphSolver::sms_solve()
+       // for (int lit : assumptions)
+       //   printf(" %d", lit);
+       // printf("\n");
+ 
+       clock_t start = clock();
+-      if (sms_main_loop(assumptions, config.cubeTimeout) == 0)
++      int cubeResult = sms_main_loop(assumptions, config.cubeTimeout);
++      if (cubeResult == 0)
+       {
+         printf("Timeout reached for solving cube\n");
+       }
+       else
+       {
+         printf("Time for cube %f\n", ((double)clock() - start) / CLOCKS_PER_SEC);
+       }
++      printf("Cube result: %d\n", cubeResult);
++      fflush(stdout);
+       printStats();
+     }
+ 
+     printf("All cubes processed\n");

@@ -1,5 +1,11 @@
 # K16 Pisa tournament terminal search
 
+The active experiment is the
+[`v17 SMS-aware adaptive cube-and-conquer pilot`](docs/V17_SMART_CUBING.md).
+It replaces one monolithic five-hour `UNKNOWN` call with learned-clause
+partitioning and a persistent per-cube ledger.  The cancelled v16 calls are
+retained only as a timing baseline and close no mathematical region.
+
 The current proof/computation ledger is
 [`docs/k16-progress-ledger-2026-07-28.md`](docs/k16-progress-ledger-2026-07-28.md).
 It separates theorem-level results, exact solver closures, heuristic evidence,
