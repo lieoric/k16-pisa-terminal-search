@@ -211,7 +211,12 @@ def expand_tree(
     )
 
 
-def audit_tree(tree: dict, parent_literals: list[int]) -> dict:
+def audit_tree(
+    tree: dict,
+    parent_literals: list[int],
+    *,
+    split_levels: int = SPLIT_LEVELS,
+) -> dict:
     nodes = {item["node_id"]: item for item in tree["nodes"]}
     root = f"{tree['source_leaf_id']}:root"
     seen: set[str] = set()
@@ -227,7 +232,7 @@ def audit_tree(tree: dict, parent_literals: list[int]) -> dict:
         if node["cube_literals"] != expected_literals:
             raise RuntimeError("split-tree cube does not match its path")
         if node["kind"] == "branch":
-            if depth >= SPLIT_LEVELS:
+            if depth >= split_levels:
                 raise RuntimeError("branch below requested split depth")
             variable = int(node["variable"])
             if variable in {abs(literal) for literal in expected_literals}:
@@ -250,14 +255,14 @@ def audit_tree(tree: dict, parent_literals: list[int]) -> dict:
     walk(root, 0, list(parent_literals))
     if seen != set(nodes):
         raise RuntimeError("unreachable split-tree nodes")
-    if len(terminals) > (1 << SPLIT_LEVELS):
+    if len(terminals) > (1 << split_levels):
         raise RuntimeError("too many split-tree terminals")
     return {
         "complete_binary_branching": True,
         "root_cube_sha256": cube_hash(parent_literals),
         "reachable_nodes": len(seen),
         "terminal_nodes": len(terminals),
-        "maximum_terminal_nodes": 1 << SPLIT_LEVELS,
+        "maximum_terminal_nodes": 1 << split_levels,
     }
 
 
