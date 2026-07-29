@@ -16,6 +16,11 @@ on:
         required: true
         default: "30392007056"
         type: string
+  pull_request:
+    paths:
+      - ".github/workflows/v24a-v22-cube-conquer.yml"
+      - "scripts/k16_v24a_cube_conquer.py"
+      - "docs/V24A_V22_CUBE_CONQUER.md"
 
 permissions:
   actions: read
@@ -27,7 +32,7 @@ concurrency:
 
 env:
   PYTHONUNBUFFERED: "1"
-  V22_RUN_ID: ${{ inputs.v22_run_id }}
+  V22_RUN_ID: ${{ inputs.v22_run_id || '30392007056' }}
   KISSAT_TAG: rel-4.0.4
   KISSAT_COMMIT: 8af8e56f174b778aef3aa45af9f739b2a5f492c2
 
@@ -137,7 +142,7 @@ jobs:
   smoke:
     name: Ten-second CaDiCaL and Kissat environment gate
     needs: plan
-    if: inputs.mode == 'smoke'
+    if: inputs.mode != 'formal'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
