@@ -55,12 +55,18 @@ jobs:
           run-id: ${{ env.PRIOR_ATLAS_RUN_ID }}
           github-token: ${{ github.token }}
       - name: Download all seven exact V22 partitions
-        uses: actions/download-artifact@v4
-        with:
-          pattern: v22-atlas-partition-*
-          path: partitions
-          run-id: ${{ env.PRIOR_ATLAS_RUN_ID }}
-          github-token: ${{ github.token }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for box in \
+            a0_z2 a0_z3 a0_z4p a1_z2 a1_z4p a2p_z2 a2p_z3
+          do
+            gh run download "${{ env.PRIOR_ATLAS_RUN_ID }}" \
+              --name "v22-atlas-partition-${box}" \
+              --dir "partitions/v22-atlas-partition-${box}"
+          done
       - id: matrix
         name: Validate complements and build bounded CaDiCaL batches
         shell: bash
