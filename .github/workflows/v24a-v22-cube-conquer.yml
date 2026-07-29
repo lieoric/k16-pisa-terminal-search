@@ -142,7 +142,7 @@ jobs:
   smoke:
     name: Ten-second CaDiCaL and Kissat environment gate
     needs: plan
-    if: inputs.mode != 'formal'
+    if: inputs.mode == 'smoke'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -232,7 +232,9 @@ jobs:
   cadical:
     name: ${{ matrix.task_id }}
     needs: plan
-    if: inputs.mode == 'formal' && needs.plan.outputs.count != '0'
+    if: >-
+      (inputs.mode == 'formal' || github.event_name == 'pull_request') &&
+      needs.plan.outputs.count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 75
     strategy:
@@ -319,7 +321,7 @@ jobs:
       - cadical
     if: >-
       always() &&
-      inputs.mode == 'formal' &&
+      (inputs.mode == 'formal' || github.event_name == 'pull_request') &&
       needs.plan.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -436,7 +438,7 @@ jobs:
       - kissat
     if: >-
       always() &&
-      inputs.mode == 'formal' &&
+      (inputs.mode == 'formal' || github.event_name == 'pull_request') &&
       needs.plan.result == 'success' &&
       needs.select-kissat.result == 'success'
     runs-on: ubuntu-latest
