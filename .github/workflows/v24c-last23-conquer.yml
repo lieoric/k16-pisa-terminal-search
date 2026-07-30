@@ -1,0 +1,423 @@
+name: K16 v24-C last-23 cube-and-conquer
+
+on:
+  workflow_dispatch:
+    inputs:
+      v24b_run_id:
+        description: "Completed V24-B run carrying the exact 23-child frontier"
+        required: true
+        default: "30490334948"
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/v24b-solver-lane.yml"
+      - ".github/workflows/v24c-last23-conquer.yml"
+      - "scripts/k16_v24c_last23_conquer.py"
+      - "docs/V24C_LAST23_CONQUER.md"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: k16-v24c-last23-conquer
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  V24B_RUN_ID: ${{ inputs.v24b_run_id || '30490334948' }}
+
+jobs:
+  plan:
+    name: Audit V24-B and build 23 complete three-level trees
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      matrix_g1: ${{ steps.matrix.outputs.matrix_g1 }}
+      matrix_g2: ${{ steps.matrix.outputs.matrix_g2 }}
+      matrix_g3: ${{ steps.matrix.outputs.matrix_g3 }}
+      count_g1: ${{ steps.matrix.outputs.count_g1 }}
+      count_g2: ${{ steps.matrix.outputs.count_g2 }}
+      count_g3: ${{ steps.matrix.outputs.count_g3 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Download the immutable V24-B source
+        uses: actions/download-artifact@v4
+        with:
+          name: v24b-source
+          path: prior/source
+          run-id: ${{ env.V24B_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download the completed V24-B ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24b-ledger
+          path: prior/ledger
+          run-id: ${{ env.V24B_RUN_ID }}
+          github-token: ${{ github.token }}
+      - id: matrix
+        name: Build and audit the exact V24-C refinement
+        shell: bash
+        run: |
+          set -o pipefail
+          ledger="$(find prior/ledger -name \
+            'v24b-ledger.json' -type f -print -quit)"
+          test -n "$ledger"
+          python scripts/k16_v24c_last23_conquer.py \
+            --plan \
+            --v24b-source prior/source \
+            --v24b-ledger "$ledger" \
+            --v24b-run-id "$V24B_RUN_ID" \
+            --output v24c-source \
+            --matrix-dir v24c-matrices \
+            | tee v24c-plan.log
+          for group in g1 g2 g3
+          do
+            matrix="$(tr -d '\n' \
+              < "v24c-matrices/cadical-$group.json")"
+            count="$(python -c \
+              "import json; print(len(json.load(open('v24c-matrices/cadical-$group.json'))['include']))")"
+            echo "matrix_$group=$matrix" >> "$GITHUB_OUTPUT"
+            echo "count_$group=$count" >> "$GITHUB_OUTPUT"
+          done
+      - name: Build small immutable source artifacts per lane
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for group in g1 g2 g3
+          do
+            mkdir -p "v24c-source-$group/boxes"
+            cp v24c-source/v24c-manifest.json "v24c-source-$group/"
+            cp -a v24c-source/cadical "v24c-source-$group/"
+            cp -a v24c-source/kissat "v24c-source-$group/"
+          done
+          for box in a0_z2 a1_z4p
+          do
+            cp -a "v24c-source/boxes/$box" "v24c-source-g1/boxes/"
+          done
+          cp -a v24c-source/boxes/a0_z3 v24c-source-g2/boxes/
+          cp -a v24c-source/boxes/a0_z4p v24c-source-g3/boxes/
+      - name: Check both inherited solver binaries
+        shell: bash
+        run: |
+          chmod +x v24c-source/cadical/cadical
+          chmod +x v24c-source/kissat/kissat
+          v24c-source/cadical/cadical --version
+          v24c-source/kissat/kissat --version
+      - name: Publish the exact partition summary
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          p = json.loads(Path("v24c-source/v24c-manifest.json").read_text())
+          tasks = p["cadical_tasks"]
+          print("## V24-C exact plan")
+          print("\n- inherited exact partition leaves: `656 / 676`")
+          print("- V23 source leaves still open: `20`")
+          print(f"- V24-B child leaves refined: `{len(p['trees'])}`")
+          print("- complete binary levels per child: `3`")
+          print(
+              f"- unit-closed terminals: "
+              f"`{len(p['unit_closed_children'])}`"
+          )
+          print(f"- queued solver children: `{len(tasks)}`")
+          print(f"- by group: `{dict(Counter(t['group'] for t in tasks))}`")
+          print(f"- by box: `{dict(Counter(t['box'] for t in tasks))}`")
+          print(
+              f"- all coverage audits passed: "
+              f"`{p['coverage']['all_tree_audits_passed']}`"
+          )
+          print("\nUNKNOWN remains open and is never counted as exclusion.")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24c-source
+          path: v24c-source/
+          if-no-files-found: error
+          retention-days: 90
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24c-source-g1
+          path: v24c-source-g1/
+          if-no-files-found: error
+          retention-days: 90
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24c-source-g2
+          path: v24c-source-g2/
+          if-no-files-found: error
+          retention-days: 90
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24c-source-g3
+          path: v24c-source-g3/
+          if-no-files-found: error
+          retention-days: 90
+
+  cadical-g1:
+    name: CaDiCaL group 1
+    needs: plan
+    if: needs.plan.outputs.count_g1 != '0'
+    uses: ./.github/workflows/v24b-solver-lane.yml
+    with:
+      matrix: ${{ needs.plan.outputs.matrix_g1 }}
+      solver: cadical
+      source_artifact: v24c-source-g1
+      manifest_path: source/v24c-manifest.json
+      result_prefix: v24c-cadical
+      max_parallel: 2
+      script: scripts/k16_v24c_last23_conquer.py
+
+  cadical-g2:
+    name: CaDiCaL group 2
+    needs: plan
+    if: needs.plan.outputs.count_g2 != '0'
+    uses: ./.github/workflows/v24b-solver-lane.yml
+    with:
+      matrix: ${{ needs.plan.outputs.matrix_g2 }}
+      solver: cadical
+      source_artifact: v24c-source-g2
+      manifest_path: source/v24c-manifest.json
+      result_prefix: v24c-cadical
+      max_parallel: 7
+      script: scripts/k16_v24c_last23_conquer.py
+
+  cadical-g3:
+    name: CaDiCaL group 3
+    needs: plan
+    if: needs.plan.outputs.count_g3 != '0'
+    uses: ./.github/workflows/v24b-solver-lane.yml
+    with:
+      matrix: ${{ needs.plan.outputs.matrix_g3 }}
+      solver: cadical
+      source_artifact: v24c-source-g3
+      manifest_path: source/v24c-manifest.json
+      result_prefix: v24c-cadical
+      max_parallel: 11
+      script: scripts/k16_v24c_last23_conquer.py
+
+  select-kissat:
+    name: Send only CaDiCaL UNKNOWN children to Kissat
+    needs:
+      - plan
+      - cadical-g1
+      - cadical-g2
+      - cadical-g3
+    if: >-
+      always() &&
+      needs.plan.result == 'success' &&
+      needs.cadical-g1.result == 'success' &&
+      needs.cadical-g2.result == 'success' &&
+      needs.cadical-g3.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      matrix_g1: ${{ steps.matrix.outputs.matrix_g1 }}
+      matrix_g2: ${{ steps.matrix.outputs.matrix_g2 }}
+      matrix_g3: ${{ steps.matrix.outputs.matrix_g3 }}
+      count_g1: ${{ steps.matrix.outputs.count_g1 }}
+      count_g2: ${{ steps.matrix.outputs.count_g2 }}
+      count_g3: ${{ steps.matrix.outputs.count_g3 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v24c-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v24c-cadical-*
+          path: cadical-results
+      - id: matrix
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/k16_v24c_last23_conquer.py \
+            --select-kissat \
+            --source source \
+            --cadical-results-root cadical-results \
+            --output v24c-stage \
+            --matrix-dir v24c-kissat-matrices \
+            | tee v24c-select-kissat.log
+          for group in g1 g2 g3
+          do
+            matrix="$(tr -d '\n' \
+              < "v24c-kissat-matrices/kissat-$group.json")"
+            count="$(python -c \
+              "import json; print(len(json.load(open('v24c-kissat-matrices/kissat-$group.json'))['include']))")"
+            echo "matrix_$group=$matrix" >> "$GITHUB_OUTPUT"
+            echo "count_$group=$count" >> "$GITHUB_OUTPUT"
+          done
+      - name: Publish the CaDiCaL handoff
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(
+              Path("v24c-stage/v24c-cadical-ledger.json").read_text()
+          )
+          print("## V24-C CaDiCaL stage")
+          print(f"\n- statuses: `{r['statuses']}`")
+          print(f"- exact closed children: `{len(r['exact_closed_root_ids'])}`")
+          print(f"- Kissat fallback children: `{len(r['unknown_root_ids'])}`")
+          print(f"- verified SAT: `{len(r['verified_sat_witnesses'])}`")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24c-cadical-stage
+          path: v24c-stage/
+          if-no-files-found: error
+          retention-days: 90
+
+  kissat-g1:
+    name: Kissat group 1
+    needs: select-kissat
+    if: needs.select-kissat.outputs.count_g1 != '0'
+    uses: ./.github/workflows/v24b-solver-lane.yml
+    with:
+      matrix: ${{ needs.select-kissat.outputs.matrix_g1 }}
+      solver: kissat
+      source_artifact: v24c-source-g1
+      manifest_artifact: v24c-cadical-stage
+      manifest_path: stage/v24c-kissat-manifest.json
+      result_prefix: v24c-kissat
+      max_parallel: 2
+      script: scripts/k16_v24c_last23_conquer.py
+
+  kissat-g2:
+    name: Kissat group 2
+    needs: select-kissat
+    if: needs.select-kissat.outputs.count_g2 != '0'
+    uses: ./.github/workflows/v24b-solver-lane.yml
+    with:
+      matrix: ${{ needs.select-kissat.outputs.matrix_g2 }}
+      solver: kissat
+      source_artifact: v24c-source-g2
+      manifest_artifact: v24c-cadical-stage
+      manifest_path: stage/v24c-kissat-manifest.json
+      result_prefix: v24c-kissat
+      max_parallel: 7
+      script: scripts/k16_v24c_last23_conquer.py
+
+  kissat-g3:
+    name: Kissat group 3
+    needs: select-kissat
+    if: needs.select-kissat.outputs.count_g3 != '0'
+    uses: ./.github/workflows/v24b-solver-lane.yml
+    with:
+      matrix: ${{ needs.select-kissat.outputs.matrix_g3 }}
+      solver: kissat
+      source_artifact: v24c-source-g3
+      manifest_artifact: v24c-cadical-stage
+      manifest_path: stage/v24c-kissat-manifest.json
+      result_prefix: v24c-kissat
+      max_parallel: 11
+      script: scripts/k16_v24c_last23_conquer.py
+
+  aggregate:
+    name: Publish the resumable V24-C ledger
+    needs:
+      - plan
+      - select-kissat
+      - kissat-g1
+      - kissat-g2
+      - kissat-g3
+    if: >-
+      always() &&
+      needs.plan.result == 'success' &&
+      needs.select-kissat.result == 'success' &&
+      (needs.kissat-g1.result == 'success' ||
+       needs.kissat-g1.result == 'skipped') &&
+      (needs.kissat-g2.result == 'success' ||
+       needs.kissat-g2.result == 'skipped') &&
+      (needs.kissat-g3.result == 'success' ||
+       needs.kissat-g3.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v24c-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          name: v24c-cadical-stage
+          path: stage
+      - name: Download Kissat results
+        if: >-
+          needs.select-kissat.outputs.count_g1 != '0' ||
+          needs.select-kissat.outputs.count_g2 != '0' ||
+          needs.select-kissat.outputs.count_g3 != '0'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v24c-kissat-*
+          path: kissat-results
+      - name: Merge only exact closures
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p kissat-results aggregate
+          python scripts/k16_v24c_last23_conquer.py \
+            --aggregate \
+            --source source \
+            --cadical-ledger stage/v24c-cadical-ledger.json \
+            --kissat-results-root kissat-results \
+            --workflow-run-id "${{ github.run_id }}" \
+            --output aggregate/v24c-ledger.json \
+            | tee aggregate/v24c-ledger.log
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(Path("aggregate/v24c-ledger.json").read_text())
+          print("## V24-C final verdict")
+          print(f"\n- conclusion: `{r['logical_conclusion']}`")
+          print(
+              f"- closed V24-B source children: "
+              f"`{r['closed_v24b_child_count']}` / 23"
+          )
+          print(
+              f"- newly closed V23 source leaves: "
+              f"`{r['newly_closed_v23_source_leaf_count']}` / 20"
+          )
+          print(
+              f"- exact partition leaves: "
+              f"`{r['exact_partition_leaf_closures']}` / 676"
+          )
+          print(
+              f"- exact roots: "
+              f"`{len(r['roots_exactly_excluded'])}` / 7"
+          )
+          print(f"- remaining child leaves: `{r['open_terminal_count']}`")
+          print(f"- verified SAT: `{len(r['verified_sat_witnesses'])}`")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24c-ledger
+          path: aggregate/
+          if-no-files-found: error
+          retention-days: 90

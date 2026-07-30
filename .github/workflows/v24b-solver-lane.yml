@@ -1,4 +1,4 @@
-name: K16 v24-B reusable solver lane
+name: K16 reusable exact solver lane
 
 on:
   workflow_call:
@@ -32,6 +32,11 @@ on:
         description: "Runner allocation for this lane"
         required: true
         type: number
+      script:
+        description: "Campaign solver script"
+        required: false
+        default: "scripts/k16_v24b_seven_root_conquer.py"
+        type: string
 
 permissions:
   actions: read
@@ -76,7 +81,7 @@ jobs:
             test "${{ inputs.solver }}" = "kissat"
           chmod +x "source/${{ inputs.solver }}/${{ inputs.solver }}"
           mkdir -p results logs
-          python scripts/k16_v24b_seven_root_conquer.py \
+          python "${{ inputs.script }}" \
             --solve \
             --source source \
             --manifest "${{ inputs.manifest_path }}" \
@@ -99,7 +104,11 @@ jobs:
               r = json.loads(paths[0].read_text())
               print(f"## {r['task_id']}: {r['status']}")
               print(f"\n- box: `{r['box']}`")
-              print(f"- V23 source leaf: `{r['source_leaf_id']}`")
+              source_leaf = r.get(
+                  "v23_source_leaf_id",
+                  r.get("source_leaf_id"),
+              )
+              print(f"- V23 source leaf: `{source_leaf}`")
               print(f"- complete split path: `{r['split_path']}`")
               print(
                   f"- seconds: `{r['seconds']}` / "
