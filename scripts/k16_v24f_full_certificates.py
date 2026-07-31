@@ -250,6 +250,36 @@ def materialized_hash(base: Path, cube: list[int], scratch: Path) -> str:
     return digest
 
 
+def split_release_payload(
+    source: Path,
+    destination: Path,
+    prefix: str,
+    part_bytes: int = 1_900_000_000,
+) -> list[dict]:
+    """Split a durable payload below GitHub's 2 GiB release-asset limit."""
+    destination.mkdir(parents=True, exist_ok=True)
+    records = []
+    with source.open("rb") as reader:
+        index = 0
+        while True:
+            chunk = reader.read(part_bytes)
+            if not chunk:
+                break
+            path = destination / f"{prefix}.part{index:03d}"
+            path.write_bytes(chunk)
+            records.append(
+                {
+                    "file": path.name,
+                    "bytes": path.stat().st_size,
+                    "sha256": sha256(path),
+                }
+            )
+            index += 1
+    if not records:
+        raise RuntimeError("cannot archive an empty LRAT payload")
+    return records
+
+
 def balance_waves(tasks: list[dict]) -> None:
     """Balanced deterministic round-robin with a hard <= 188 task cap."""
     ordered = sorted(
@@ -724,6 +754,7 @@ def certify_task(
     source: Path,
     certificate_task_id: str,
     output: Path,
+    publication_mode: bool,
 ) -> dict:
     plan = load_json(source / PLAN_FILENAME)
     matches = [
@@ -800,6 +831,21 @@ def certify_task(
     lrat.unlink()
     cnf.unlink()
 
+    publication_payload = None
+    if publication_mode:
+        release_parts = split_release_payload(
+            lrat_zst,
+            output / "release-payload",
+            f"{certificate_task_id}.lrat.zst",
+        )
+        publication_payload = {
+            "format": "LRAT compressed with Zstandard and split into parts",
+            "whole_compressed_sha256": sha256(lrat_zst),
+            "whole_compressed_bytes": lrat_zst.stat().st_size,
+            "release_parts": release_parts,
+            "drat_payload_retained": False,
+            "drat_receipt_retained": True,
+        }
     result = {
         "schema": RESULT_SCHEMA,
         "model_version": MODEL_VERSION,
@@ -844,8 +890,12 @@ def certify_task(
                 "compression_seconds": round(lrat_compress_seconds, 3),
             },
         },
+        "publication_payload": publication_payload,
     }
     write_json(output / "certificate-result.json", result)
+    if publication_mode:
+        proof_zst.unlink()
+        lrat_zst.unlink()
     print(json.dumps(result, indent=2), flush=True)
     return result
 
@@ -858,6 +908,7 @@ def aggregate_wave(
     mode: str,
     wave: int,
     workflow_run_id: str,
+    release_tag: str | None,
 ) -> dict:
     plan = load_json(source / PLAN_FILENAME)
     if mode == "pilot":
@@ -877,6 +928,8 @@ def aggregate_wave(
             f"missing={sorted(set(expected) - set(by_id))}, "
             f"unexpected={sorted(set(by_id) - set(expected))}"
         )
+    if mode == "formal" and not release_tag:
+        raise RuntimeError("a formal wave requires a durable release tag")
     for task_id, task in expected.items():
         record = by_id[task_id]
         if (
@@ -893,11 +946,25 @@ def aggregate_wave(
         ):
             if record[key] != task[key]:
                 raise RuntimeError(f"certificate provenance mismatch: {task_id}")
+        if mode == "formal":
+            payload = record.get("publication_payload") or {}
+            parts = payload.get("release_parts", [])
+            if (
+                not parts
+                or payload.get("whole_compressed_sha256")
+                != record["certificates"]["lrat"]["compressed_sha256"]
+                or sum(int(part["bytes"]) for part in parts)
+                != int(payload.get("whole_compressed_bytes", -1))
+            ):
+                raise RuntimeError(
+                    f"incomplete durable release payload: {task_id}"
+                )
     ledger = {
         "schema": WAVE_SCHEMA,
         "model_version": MODEL_VERSION,
         "created_utc": utc_now(),
         "workflow_run_id": workflow_run_id,
+        "release_tag": release_tag,
         "mode": mode,
         "wave": wave if mode == "formal" else None,
         "logical_conclusion": (
@@ -981,6 +1048,10 @@ def aggregate_final(
             str(record["wave"]): record["workflow_run_id"]
             for record in ledgers
         },
+        "wave_release_tags": {
+            str(record["wave"]): record["release_tag"]
+            for record in ledgers
+        },
         "terminal_certificate_count": len(records),
         "drat_verified": len(records),
         "lrat_verified": len(records),
@@ -1032,12 +1103,14 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--checker-root", type=Path)
     p.add_argument("--source", type=Path)
     p.add_argument("--certificate-task-id")
+    p.add_argument("--publication-mode", action="store_true")
     p.add_argument("--results-root", type=Path)
     p.add_argument("--wave-ledgers-root", type=Path)
     p.add_argument("--matrix", type=Path)
     p.add_argument("--mode", choices=("pilot", "formal"), default="pilot")
     p.add_argument("--wave", type=int, default=1)
     p.add_argument("--workflow-run-id")
+    p.add_argument("--release-tag")
     p.add_argument("--output", type=Path, required=True)
     return p
 
@@ -1064,6 +1137,7 @@ def main() -> None:
             source=args.source,
             certificate_task_id=args.certificate_task_id,
             output=args.output,
+            publication_mode=args.publication_mode,
         )
     elif args.aggregate_wave:
         aggregate_wave(
@@ -1073,6 +1147,7 @@ def main() -> None:
             mode=args.mode,
             wave=args.wave,
             workflow_run_id=args.workflow_run_id,
+            release_tag=args.release_tag,
         )
     else:
         aggregate_final(

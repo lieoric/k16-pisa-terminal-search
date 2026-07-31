@@ -561,6 +561,12 @@ checks every historical hash and binary-tree polarity, then regenerates a
 CaDiCaL DRAT proof, validates it with pinned `drat-trim`, derives LRAT, and
 validates LRAT separately for every terminal.
 
+Formal waves publish the checked LRAT payloads and their frozen source bundle
+to six wave-specific GitHub Releases. Actions artifacts carry only the compact
+receipts and ledgers. The final V24-G ledger binds all 1,124 terminal receipts,
+the six release tags, and all 676 original V23 leaves to one deterministic
+forest hash.
+
 See:
 
 - `.github/workflows/v24f-complete-proof-forest.yml`;

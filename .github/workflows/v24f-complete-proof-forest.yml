@@ -24,7 +24,7 @@ on:
 
 permissions:
   actions: read
-  contents: read
+  contents: write
 
 concurrency:
   group: >-
@@ -50,6 +50,7 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       selected_count: ${{ steps.plan.outputs.selected_count }}
       forest_sha256: ${{ steps.plan.outputs.forest_sha256 }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -207,6 +208,30 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "selected_count=$selected_count" >> "$GITHUB_OUTPUT"
           echo "forest_sha256=$forest_sha256" >> "$GITHUB_OUTPUT"
+      - id: release
+        name: Prepare a durable draft release for a formal wave
+        if: env.CAMPAIGN_MODE == 'formal'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          forest_sha256="$(
+            python -c \
+              'import json; print(json.load(open("v24f-source/v24f-certificate-manifest.json"))["forest_sha256"])'
+          )"
+          tag="v24f-${forest_sha256:0:12}-w${CAMPAIGN_WAVE}-${GITHUB_SHA:0:8}"
+          title="K16 V24-F certificate wave ${CAMPAIGN_WAVE}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --draft \
+              --target "$GITHUB_SHA" \
+              --title "$title" \
+              --notes "Durable LRAT certificates for V24-F formal wave ${CAMPAIGN_WAVE}. Forest SHA-256: ${forest_sha256}."
+          fi
+          tar -C v24f-source -czf v24f-source.tar.gz .
+          gh release upload "$tag" v24f-source.tar.gz --clobber
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Publish plan summary
         shell: bash
         run: |
@@ -284,6 +309,11 @@ jobs:
             --source "$source_dir" \
             --certificate-task-id \
               "${{ matrix.certificate_task_id }}" \
+            $(
+              if [[ "$CAMPAIGN_MODE" == "formal" ]]; then
+                printf '%s' "--publication-mode"
+              fi
+            ) \
             --output certificate \
             2>&1 | tee certificate-wrapper.log
       - name: Publish certificate status
@@ -310,6 +340,29 @@ jobs:
                   f"`{r['certificates']['drat']['compressed_bytes'] + r['certificates']['lrat']['compressed_bytes']}`"
               )
           PY
+      - name: Upload durable LRAT parts to the formal wave release
+        if: env.CAMPAIGN_MODE == 'formal'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p durable-release
+          cp certificate/release-payload/* durable-release/
+          cp \
+            certificate/certificate-result.json \
+            "durable-release/${{ matrix.certificate_task_id }}.json"
+          for attempt in 1 2 3; do
+            if gh release upload \
+              "$RELEASE_TAG" \
+              durable-release/* \
+              --clobber; then
+              exit 0
+            fi
+            sleep $((attempt * 15))
+          done
+          exit 1
       - id: receipt_upload
         uses: actions/upload-artifact@v4
         if: always()
@@ -334,7 +387,7 @@ jobs:
           overwrite: true
       - id: proof_upload
         uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && env.CAMPAIGN_MODE == 'pilot'
         continue-on-error: true
         with:
           name: >-
@@ -344,11 +397,14 @@ jobs:
             certificate/logs/
             certificate-wrapper.log
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 1
           compression-level: 0
       - name: Retry proof upload
         uses: actions/upload-artifact@v4
-        if: always() && steps.proof_upload.outcome == 'failure'
+        if: >-
+          always() &&
+          env.CAMPAIGN_MODE == 'pilot' &&
+          steps.proof_upload.outcome == 'failure'
         with:
           name: >-
             v24f-proof-${{ matrix.certificate_task_id }}
@@ -357,7 +413,7 @@ jobs:
             certificate/logs/
             certificate-wrapper.log
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 1
           compression-level: 0
           overwrite: true
 
@@ -398,6 +454,7 @@ jobs:
             --mode "$CAMPAIGN_MODE" \
             --wave "$CAMPAIGN_WAVE" \
             --workflow-run-id "${{ github.run_id }}" \
+            --release-tag "${{ needs.plan.outputs.release_tag }}" \
             --output final/v24f-wave-ledger.json \
             | tee final/v24f-wave-ledger.log
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
@@ -412,6 +469,81 @@ jobs:
           print(f"- LRAT verified: `{r['lrat_verified']}`")
           print(f"- forest SHA-256: `{r['forest_sha256']}`")
           PY
+      - name: Verify durable release assets and publish the formal wave
+        if: env.CAMPAIGN_MODE == 'formal'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --json assets > release-assets.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          assets = {
+              item["name"]: item
+              for item in json.loads(
+                  Path("release-assets.json").read_text()
+              )["assets"]
+          }
+          receipts = []
+          for path in Path("receipts").rglob("certificate-result.json"):
+              receipts.append(json.loads(path.read_text()))
+          expected = {"v24f-source.tar.gz"}
+          for receipt in receipts:
+              task_id = receipt["certificate_task_id"]
+              expected.add(f"{task_id}.json")
+              expected.update(
+                  part["file"]
+                  for part in receipt["publication_payload"]["release_parts"]
+              )
+          missing = sorted(expected - set(assets))
+          mismatched = []
+          for receipt in receipts:
+              for part in receipt["publication_payload"]["release_parts"]:
+                  asset = assets.get(part["file"])
+                  if not asset:
+                      continue
+                  if (
+                      int(asset["size"]) != int(part["bytes"])
+                      or asset.get("digest") != f"sha256:{part['sha256']}"
+                  ):
+                      mismatched.append(
+                          {
+                              "file": part["file"],
+                              "expected_bytes": part["bytes"],
+                              "actual_bytes": asset["size"],
+                              "expected_digest": (
+                                  f"sha256:{part['sha256']}"
+                              ),
+                              "actual_digest": asset.get("digest"),
+                          }
+                      )
+          unexpected_proof_count = len(
+              [
+                  name
+                  for name in assets
+                  if name.endswith(".lrat.zst.part000")
+              ]
+          )
+          if missing:
+              raise SystemExit(f"missing durable release assets: {missing}")
+          if mismatched:
+              raise SystemExit(
+                  f"durable LRAT asset mismatch: {mismatched}"
+              )
+          if unexpected_proof_count != len(receipts):
+              raise SystemExit(
+                  "release does not contain one LRAT payload per receipt"
+              )
+          print(
+              f"verified {len(receipts)} receipts and "
+              f"{len(expected)} durable assets"
+          )
+          PY
+          gh release edit "$RELEASE_TAG" --draft=false --latest=false
       - uses: actions/upload-artifact@v4
         with:
           name: >-

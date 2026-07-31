@@ -52,11 +52,17 @@ For each terminal formula:
 3. run the frozen CaDiCaL binary and emit binary DRAT;
 4. validate DRAT with pinned `drat-trim` and derive LRAT;
 5. validate LRAT with the separately compiled `lrat-check`;
-6. compress both proofs and record raw and compressed SHA-256 hashes.
+6. compress both proofs and record raw and compressed SHA-256 hashes;
+7. retain the checked LRAT payload as the durable publication certificate.
 
-Proof payloads and lightweight receipts are uploaded separately.  Aggregation
-downloads only receipts, avoiding a multi-gigabyte proof download in the
-ledger job.
+The DRAT proof is an intermediate witness used by `drat-trim`; its hashes,
+sizes, command line, and successful checker receipt remain in the ledger.
+The independently checked LRAT proof is split below GitHub's per-release-asset
+limit and uploaded to a wave-specific GitHub Release.  Every release also
+contains the frozen source/manifest bundle and one JSON receipt per terminal.
+Actions artifacts retain only lightweight receipts and ledgers, avoiding both
+a multi-gigabyte aggregation download and the much smaller Actions artifact
+storage quota.
 
 ## Six balanced formal waves
 
@@ -68,7 +74,10 @@ formulas from all refinement levels.
 Run the pilot once, then dispatch formal waves `1` through `6`.  The six wave
 ledgers share one deterministic `forest_sha256`.  A final ledger may claim
 complete certificate coverage only when all six waves are present and their
-1124 task identifiers are disjoint and exhaustive.
+1124 task identifiers are disjoint and exhaustive.  Each formal wave ledger
+records its immutable workflow run ID and durable release tag.  The wave is
+published only after the aggregator confirms that every receipt has its
+declared LRAT parts and result JSON in that release.
 
 ## Claim boundary
 
