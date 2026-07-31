@@ -8,6 +8,11 @@ on:
         required: true
         default: "30602758451"
         type: string
+  pull_request:
+    paths:
+      - ".github/workflows/v24e-proof-certificates.yml"
+      - "scripts/k16_v24e_proof_certificates.py"
+      - "docs/V24E_PROOF_CERTIFICATES.md"
 
 permissions:
   actions: read
