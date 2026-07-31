@@ -1,0 +1,368 @@
+name: K16 v24-E DRAT and LRAT certificates
+
+on:
+  workflow_dispatch:
+    inputs:
+      v24d_run_id:
+        description: "Completed V24-D 676/676 run"
+        required: true
+        default: "30602758451"
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: k16-v24e-proof-certificates
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  V24D_RUN_ID: ${{ inputs.v24d_run_id }}
+  V24D_SOURCE_COMMIT: 7e639de2d6b68ec903e375c8f05dfa593b89f5d2
+  DRAT_TRIM_COMMIT: 2e3b2dc0ecf938addbd779d42877b6ed69d9a985
+
+jobs:
+  plan:
+    name: Freeze V24-D and build eight certificate formulas
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      matrix_rest: ${{ steps.plan.outputs.matrix_rest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Download immutable V24-D source
+        uses: actions/download-artifact@v4
+        with:
+          name: v24d-source
+          path: prior/source
+          run-id: ${{ env.V24D_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download final V24-D ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24d-ledger
+          path: prior/ledger
+          run-id: ${{ env.V24D_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download all eight original V24-D results and logs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v24d-cadical-*
+          path: prior/results
+          run-id: ${{ env.V24D_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Build pinned independent proof checkers
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git init checker-source
+          git -C checker-source remote add origin \
+            https://github.com/marijnheule/drat-trim.git
+          git -C checker-source fetch --depth 1 origin "$DRAT_TRIM_COMMIT"
+          git -C checker-source checkout --detach FETCH_HEAD
+          test "$(git -C checker-source rev-parse HEAD)" = "$DRAT_TRIM_COMMIT"
+          make -C checker-source
+          mkdir -p checkers
+          cp checker-source/drat-trim checker-source/lrat-check checkers/
+          checkers/drat-trim -h | head -n 3
+          checkers/lrat-check 2>&1 | head -n 2 || true
+      - id: plan
+        name: Audit and freeze the certificate plan
+        shell: bash
+        run: |
+          set -o pipefail
+          ledger="$(find prior/ledger -name \
+            'v24d-ledger.json' -type f -print -quit)"
+          test -n "$ledger"
+          python scripts/k16_v24e_proof_certificates.py \
+            --plan \
+            --v24d-source prior/source \
+            --v24d-ledger "$ledger" \
+            --original-results-root prior/results \
+            --checker-root checkers \
+            --v24d-run-id "$V24D_RUN_ID" \
+            --source-commit "$V24D_SOURCE_COMMIT" \
+            --output v24e-source \
+            --matrix v24e-matrix.json \
+            | tee v24e-plan.log
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          matrix = json.loads(Path("v24e-matrix.json").read_text())
+          matrix["include"] = [
+              item
+              for item in matrix["include"]
+              if item["root_id"] != "d05"
+          ]
+          Path("v24e-matrix-rest.json").write_text(
+              json.dumps(matrix, separators=(",", ":"))
+          )
+          PY
+          matrix_rest="$(tr -d '\n' < v24e-matrix-rest.json)"
+          echo "matrix_rest=$matrix_rest" >> "$GITHUB_OUTPUT"
+      - name: Publish certificate plan
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          p = json.loads(
+              Path("v24e-source/v24e-certificate-manifest.json").read_text()
+          )
+          print("## V24-E certificate plan")
+          print(f"\n- V24-D run: `{p['v24d_run_id']}`")
+          print(f"- frozen source commit: `{p['v24d_source_commit']}`")
+          print(f"- checker commit: `{p['drat_trim_commit']}`")
+          print(f"- formulas: `{len(p['certificate_tasks'])}`")
+          print(f"- complete paths: `{p['coverage']['paths']}`")
+          print("- proof chain: `CaDiCaL DRAT -> drat-trim LRAT -> lrat-check`")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24e-certificate-source
+          path: v24e-source/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+  pilot:
+    name: Pilot certificate d05
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Install proof compression utility
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd
+      - uses: actions/download-artifact@v4
+        with:
+          name: v24e-certificate-source
+          path: source
+      - name: Certify the smallest observed leaf first
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x \
+            source/solver/cadical \
+            source/checker/drat-trim \
+            source/checker/lrat-check
+          python scripts/k16_v24e_proof_certificates.py \
+            --certify \
+            --source source \
+            --task-id certificate-d05 \
+            --output certificate \
+            2>&1 | tee certificate-wrapper.log
+      - name: Publish pilot proof status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          path = Path("certificate/certificate-result.json")
+          if not path.exists():
+              print("## Pilot certificate failed")
+          else:
+              r = json.loads(path.read_text())
+              print(f"## Pilot {r['root_id']}: {r['status']}")
+              print(
+                  f"\n- compressed DRAT bytes: "
+                  f"`{r['certificates']['drat']['compressed_bytes']}`"
+              )
+              print(
+                  f"- compressed LRAT bytes: "
+                  f"`{r['certificates']['lrat']['compressed_bytes']}`"
+              )
+          PY
+      - id: upload
+        uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: v24e-certificate-d05
+          path: |
+            certificate/
+            certificate-wrapper.log
+          if-no-files-found: warn
+          retention-days: 90
+          compression-level: 0
+      - name: Retry pilot upload after a transient failure
+        uses: actions/upload-artifact@v4
+        if: always() && steps.upload.outcome == 'failure'
+        with:
+          name: v24e-certificate-d05
+          path: |
+            certificate/
+            certificate-wrapper.log
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: true
+
+  certify:
+    name: Certify ${{ matrix.root_id }}
+    needs:
+      - plan
+      - pilot
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      max-parallel: 7
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix_rest) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Install proof compression utility
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd
+      - uses: actions/download-artifact@v4
+        with:
+          name: v24e-certificate-source
+          path: source
+      - name: Generate DRAT, verify it, derive LRAT, and verify LRAT
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x \
+            source/solver/cadical \
+            source/checker/drat-trim \
+            source/checker/lrat-check
+          python scripts/k16_v24e_proof_certificates.py \
+            --certify \
+            --source source \
+            --task-id "${{ matrix.task_id }}" \
+            --output certificate \
+            2>&1 | tee certificate-wrapper.log
+      - name: Publish proof status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          path = Path("certificate/certificate-result.json")
+          if not path.exists():
+              print("## Certificate generation failed")
+              print("\nNo verified certificate result was written.")
+          else:
+              r = json.loads(path.read_text())
+              print(f"## {r['root_id']}: {r['status']}")
+              print(f"\n- path: `{r['split_path']}`")
+              print(f"- CNF SHA-256: `{r['assumption_cnf_sha256']}`")
+              print(f"- DRAT checked: `{r['drat_trim']['verified']}`")
+              print(f"- LRAT checked: `{r['lrat_check']['verified']}`")
+              print(
+                  f"- DRAT bytes: "
+                  f"`{r['certificates']['drat']['raw_bytes']}`"
+              )
+              print(
+                  f"- LRAT bytes: "
+                  f"`{r['certificates']['lrat']['raw_bytes']}`"
+              )
+          PY
+      - id: upload
+        uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: v24e-certificate-${{ matrix.root_id }}
+          path: |
+            certificate/
+            certificate-wrapper.log
+          if-no-files-found: warn
+          retention-days: 90
+          compression-level: 0
+      - name: Retry certificate upload after a transient failure
+        uses: actions/upload-artifact@v4
+        if: always() && steps.upload.outcome == 'failure'
+        with:
+          name: v24e-certificate-${{ matrix.root_id }}
+          path: |
+            certificate/
+            certificate-wrapper.log
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: true
+
+  aggregate:
+    name: Publish independently verified certificate ledger
+    needs:
+      - plan
+      - pilot
+      - certify
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v24e-certificate-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v24e-certificate-d*
+          path: certificate-results
+      - name: Require and aggregate all eight independently checked proofs
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p final
+          python scripts/k16_v24e_proof_certificates.py \
+            --aggregate \
+            --source source \
+            --results-root certificate-results \
+            --workflow-run-id "${{ github.run_id }}" \
+            --output final/v24e-certificate-ledger.json \
+            | tee final/v24e-certificate-ledger.log
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(
+              Path("final/v24e-certificate-ledger.json").read_text()
+          )
+          print("## V24-E final certificate verdict")
+          print(f"\n- conclusion: `{r['logical_conclusion']}`")
+          print(f"- certificates: `{r['certificate_count']} / 8`")
+          print(f"- DRAT verified: `{r['drat_verified']} / 8`")
+          print(f"- LRAT verified: `{r['lrat_verified']} / 8`")
+          print(f"- certified paths: `{r['certified_paths']}`")
+          print(f"\n{r['scope_note']}")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24e-certificate-ledger
+          path: final/
+          if-no-files-found: error
+          retention-days: 90
