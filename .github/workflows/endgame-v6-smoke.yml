@@ -1,0 +1,90 @@
+name: K16 Pisa v6 rooted-role smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "agent/k16-endpoint-endgame"
+    paths:
+      - "k16_pisa_solver.py"
+      - "scripts/endpoint_v6.py"
+      - ".github/workflows/endgame-v6-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k16-pisa-v6-smoke
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: Rooted-role positive gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run one-blocker and three-blocker gates
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python scripts/endpoint_v6.py \
+            --gates-only --gate-seconds 60 --workers 4 \
+            --output results/gates.json \
+            2>&1 | tee logs/gates.log
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v6-smoke-gates
+          path: |
+            results/
+            logs/
+          if-no-files-found: error
+          retention-days: 90
+
+  sample_boxes:
+    name: Build and sample ${{ matrix.box }}
+    needs: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        box:
+          - d7_b1_B14_anchorD9
+          - d6_b3_B20plus_anchorD7_pattern00
+          - d6_b3_B20plus_anchorD9_pattern01
+          - d6_b3_B20plus_anchorD13_pattern11
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run a short model smoke
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "results/${{ matrix.box }}"
+          python scripts/endpoint_v6.py \
+            --box "${{ matrix.box }}" --seconds 10 --workers 4 \
+            --output "results/${{ matrix.box }}/result.json" \
+            2>&1 | tee "results/${{ matrix.box }}/run.log"
+      - name: Upload sample evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v6-smoke-${{ matrix.box }}
+          path: results/${{ matrix.box }}/
+          if-no-files-found: error
+          retention-days: 90

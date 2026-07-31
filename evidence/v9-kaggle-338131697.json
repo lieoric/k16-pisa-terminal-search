@@ -1,0 +1,102 @@
+{
+  "campaign": "K16-PISA-v9-v8-elite-exact-shells",
+  "kaggle_script_version_id": 338131697,
+  "status": "PARTIAL_CANCELLED",
+  "positive_gate": {
+    "instance": "K14",
+    "status": "SAT",
+    "verified": true
+  },
+  "source_elites": 54,
+  "witness_found": false,
+  "exact_closures": {
+    "labelled_hamming_shell_1_2": {
+      "unsat_shards": "0..53",
+      "unsat_count": 54,
+      "unknown_count": 0,
+      "not_started_count": 0
+    },
+    "labelled_hamming_shell_3_4": {
+      "unsat_shards": "0..53",
+      "unsat_count": 54,
+      "unknown_count": 0,
+      "not_started_count": 0
+    },
+    "labelled_score_vector_fiber": {
+      "unsat_shards": "0..53",
+      "unsat_count": 54,
+      "unknown_count": 0,
+      "not_started_count": 0
+    },
+    "labelled_hamming_shell_5_6": {
+      "unsat_shards": [
+        0,
+        7,
+        10,
+        11,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        23
+      ],
+      "unknown_shards": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        8,
+        9,
+        12
+      ],
+      "not_started_shards": [
+        21,
+        22,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53
+      ],
+      "unsat_count": 13,
+      "unknown_count": 9,
+      "not_started_count": 32
+    }
+  },
+  "coverage_note": "Each shell is a labelled Hamming shell after the script's canonical zero-role relabelling and inside that elite's exact endpoint constraints. The score-vector result closes only the complete labelled score-vector fiber of that canonical elite. These results do not close a whole K16 endpoint branch or K16 itself.",
+  "source": {
+    "notebook": "https://www.kaggle.com/code/chamine/k16-pisa-v9-elite-exact-repair?scriptVersionId=338131697",
+    "solver_script": "scripts/v8_elite_exact_repair.py"
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "campaign": "K16-PISA-v14-partial-migration",
+  "status": "STOPPED_FOR_V15",
+  "witness_found": false,
+  "errors": 0,
+  "github": {
+    "run_id": 30221642780,
+    "source_roots": 150,
+    "initial_presplit_leaves": 1200,
+    "attempts": 896,
+    "unsat_leaves": 144,
+    "timeout_leaves_split": 752,
+    "pending_exact_cover_leaves": 1808,
+    "roots_fully_closed": 18,
+    "roots_open": 132,
+    "solver_cpu_seconds": 138012.344,
+    "checkpoint_artifacts": "v14-stage1-shard-0..7"
+  },
+  "kaggle": {
+    "notebook": "chamine/k16-pisa-v14-resumable-8h",
+    "script_version_id": 338160983,
+    "source_roots": 149,
+    "initial_presplit_leaves": 1192,
+    "observed_unique_attempts": 220,
+    "unsat_leaves": 144,
+    "timeout_leaves_split": 76,
+    "pending_exact_cover_leaves": 1124,
+    "roots_fully_closed": 18,
+    "roots_open": 131,
+    "note": "Counts are reconstructed from the complete visible leaf log at cancellation; pending conservation is 1192 - 144 + 76 = 1124."
+  },
+  "combined": {
+    "source_roots": 299,
+    "initial_presplit_leaves": 2392,
+    "unsat_leaves": 288,
+    "timeout_leaves_split": 828,
+    "pending_exact_cover_leaves": 2932,
+    "roots_fully_closed": 36,
+    "roots_open": 263,
+    "initial_leaf_closure_rate": 0.1204013378,
+    "coverage_note": "Leaf counts are counts of current exact subcubes, not equal-volume fractions of the Boolean search space. Every timeout is replaced by two exhaustive children."
+  }
+}

@@ -1,0 +1,382 @@
+name: K16 v22 exact hard-leaf refinement
+
+on:
+  workflow_dispatch:
+    inputs:
+      v21_run_id:
+        description: "Completed V21 run whose 35 UNKNOWN leaves are refined"
+        required: true
+        default: "30353707059"
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/v22-hard-leaf-refinement.yml"
+      - "scripts/k16_v22_refine.py"
+      - "docs/V22_TWO_FRONT_CAMPAIGN.md"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: k16-v22-hard-leaf-refinement
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  V21_RUN_ID: ${{ inputs.v21_run_id || '30353707059' }}
+
+jobs:
+  plan:
+    name: Split exactly the 35 V21 UNKNOWN parents
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Download the theorem-strengthened V21 source
+        uses: actions/download-artifact@v4
+        with:
+          name: v21-theorem-source
+          path: prior/v21-source
+          run-id: ${{ env.V21_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download the final V21 ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v21-theorem-cascade-ledger
+          path: prior/v21-ledger
+          run-id: ${{ env.V21_RUN_ID }}
+          github-token: ${{ github.token }}
+      - id: matrix
+        name: Build complete adaptive MOMS refinements
+        shell: bash
+        run: |
+          set -o pipefail
+          ledger="$(find prior/v21-ledger -name \
+            'v21-theorem-cascade-ledger.json' -type f -print -quit)"
+          test -n "$ledger"
+          python scripts/k16_v22_refine.py \
+            --plan \
+            --v21-source prior/v21-source \
+            --v21-ledger "$ledger" \
+            --v21-run-id "$V21_RUN_ID" \
+            --output v22-source \
+            --matrix-output v22-cadical-matrix.json \
+            | tee v22-plan.log
+          matrix="$(tr -d '\n' < v22-cadical-matrix.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v22-cadical-matrix.json"))["include"]))')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          r = json.loads(
+              Path("v22-source/v22-refine-manifest.json").read_text()
+          )
+          tasks = r["cadical_tasks"]
+          print("## V22 hard-leaf refinement plan")
+          print(f"\n- retained V21 closures: `{len(r['v21_closed_queue_ids'])}`")
+          print(f"- refined V21 UNKNOWN parents: `{len(r['trees'])}`")
+          print(
+              f"- unit-closed children: "
+              f"`{len(r['unit_closed_children'])}`"
+          )
+          print(f"- queued exact children: `{len(tasks)}`")
+          print(
+              f"- child depths: "
+              f"`{dict(Counter(t['cube_depth'] for t in tasks))}`"
+          )
+          print(
+              "\nEvery split is complementary and complete. "
+              "No V21 closure is resubmitted."
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v22-refine-source
+          path: v22-source/
+          if-no-files-found: error
+          retention-days: 90
+
+  cadical:
+    name: ${{ matrix.task_id }}
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v22-refine-source
+          path: source
+      - name: Run one 60-minute theorem-strengthened child
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x source/cadical/cadical
+          mkdir -p results logs
+          python scripts/k16_v22_refine.py \
+            --solve \
+            --source source \
+            --manifest source/v22-refine-manifest.json \
+            --task-id "${{ matrix.task_id }}" \
+            --result "results/${{ matrix.task_id }}.json" \
+            --log "logs/${{ matrix.task_id }}.log" \
+            2>&1 | tee "logs/${{ matrix.task_id }}-wrapper.log"
+      - name: Publish logical status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          paths = list(Path("results").glob("*.json"))
+          if not paths:
+              print("## Infrastructure error\n\nNo signed result.")
+          else:
+              r = json.loads(paths[0].read_text())
+              print(f"## {r['task_id']}: {r['status']}")
+              print(f"\n- parent: `{r['parent_root_id']}`")
+              print(f"- refined depth: `{r['cube_depth']}`")
+              print(
+                  f"- seconds: `{r['seconds']}` / "
+                  f"`{r['time_limit_seconds']}`"
+              )
+              print(f"- exact UNSAT closure: `{r['solver_level_exact']}`")
+              if r["status"] == "UNKNOWN":
+                  print("- advances to the 90-minute SMS stage")
+          PY
+      - id: upload-cadical
+        uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: v22-refine-cadical-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+      - id: retry-upload-cadical
+        name: Retry CaDiCaL artifact upload after a transient failure
+        uses: actions/upload-artifact@v4
+        if: always() && steps.upload-cadical.outcome == 'failure'
+        with:
+          name: v22-refine-cadical-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
+  select-sms:
+    name: Send only refined CaDiCaL UNKNOWN children to SMS
+    needs:
+      - plan
+      - cadical
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v22-refine-source
+          path: source
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.count != '0'
+        with:
+          pattern: v22-refine-cadical-*
+          path: cadical-results
+      - id: matrix
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p cadical-results
+          python scripts/k16_v22_refine.py \
+            --select-sms \
+            --source source \
+            --cadical-results-root cadical-results \
+            --output v22-stage \
+            --matrix-output v22-sms-matrix.json \
+            | tee v22-select-sms.log
+          matrix="$(tr -d '\n' < v22-sms-matrix.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v22-sms-matrix.json"))["include"]))')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v22-refine-cadical-stage
+          path: v22-stage/
+          if-no-files-found: error
+          retention-days: 90
+
+  sms:
+    name: ${{ matrix.task_id }}
+    needs: select-sms
+    if: needs.select-sms.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.select-sms.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v22-refine-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          name: v22-refine-cadical-stage
+          path: stage
+      - name: Run one 90-minute SMS fallback
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x source/bundle/smsg
+          export LD_LIBRARY_PATH="$PWD/source/bundle/lib:${LD_LIBRARY_PATH:-}"
+          mkdir -p results logs
+          python scripts/k16_v22_refine.py \
+            --solve \
+            --source source \
+            --manifest stage/v22-sms-manifest.json \
+            --task-id "${{ matrix.task_id }}" \
+            --result "results/${{ matrix.task_id }}.json" \
+            --log "logs/${{ matrix.task_id }}.log" \
+            2>&1 | tee "logs/${{ matrix.task_id }}-wrapper.log"
+      - id: upload-sms
+        uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: v22-refine-sms-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+      - id: retry-upload-sms
+        name: Retry SMS artifact upload after a transient failure
+        uses: actions/upload-artifact@v4
+        if: always() && steps.upload-sms.outcome == 'failure'
+        with:
+          name: v22-refine-sms-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
+  aggregate:
+    name: Publish the resumable V22 refinement ledger
+    needs:
+      - plan
+      - select-sms
+      - sms
+    if: >-
+      always() &&
+      needs.plan.result == 'success' &&
+      needs.select-sms.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v22-refine-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          name: v22-refine-cadical-stage
+          path: stage
+      - name: Download SMS results
+        if: needs.select-sms.outputs.count != '0'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v22-refine-sms-*
+          path: sms-results
+      - name: Merge only exact closures
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p sms-results aggregate
+          python scripts/k16_v22_refine.py \
+            --aggregate \
+            --source source \
+            --cadical-ledger stage/v22-cadical-ledger.json \
+            --sms-results-root sms-results \
+            --workflow-run-id "${{ github.run_id }}" \
+            --output aggregate/v22-refine-ledger.json \
+            | tee aggregate/v22-refine-ledger.log
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(Path("aggregate/v22-refine-ledger.json").read_text())
+          print("## V22 hard-leaf refinement verdict")
+          print(f"\n- conclusion: `{r['logical_conclusion']}`")
+          print(
+              f"- original frontier parents closed: "
+              f"`{r['closed_parent_count']}` / 139"
+          )
+          print(f"- remaining parent regions: `{r['open_parent_count']}`")
+          print(f"- open refined children: `{r['open_child_count']}`")
+          print(f"- verified SAT: `{len(r['verified_sat_witnesses'])}`")
+          print("\nUNKNOWN remains open; the child ledger is resumable.")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v22-refine-ledger
+          path: aggregate/
+          if-no-files-found: error
+          retention-days: 90

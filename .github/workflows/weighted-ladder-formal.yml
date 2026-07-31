@@ -1,0 +1,187 @@
+name: K16 weighted quotient ladder formal matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Solver seconds per weight pattern
+        required: true
+        default: "18000"
+      workers:
+        description: CP-SAT workers per job
+        required: true
+        default: "4"
+  pull_request:
+    paths:
+      - "scripts/weighted_quotient_ladder.py"
+      - "scripts/aggregate_weighted_ladder.py"
+      - ".github/workflows/weighted-ladder-formal.yml"
+      - "requirements.txt"
+      - "pisa_verify.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k16-weighted-ladder-formal
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Validate 29-pattern plan and exact gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - id: plan
+        name: Generate all integer-partition boxes
+        shell: bash
+        run: |
+          echo "matrix=$(python scripts/weighted_quotient_ladder.py --matrix-json)" \
+            >> "$GITHUB_OUTPUT"
+          python scripts/weighted_quotient_ladder.py --list
+      - name: Run identity and solver gates
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p gates
+          python scripts/weighted_quotient_ladder.py \
+            --gates --seconds 30 \
+            --workers "${{ inputs.workers || '4' }}" \
+            --output gates/gates.json 2>&1 | tee gates/gates.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: weighted-ladder-formal-gates
+          path: gates/
+          retention-days: 90
+
+  solve:
+    name: ${{ matrix.box }} / weights ${{ join(matrix.weights, '-') }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run exact weighted quotient box
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python scripts/weighted_quotient_ladder.py \
+            --box "${{ matrix.box }}" \
+            --seconds "${{ inputs.seconds || '18000' }}" \
+            --workers "${{ inputs.workers || '4' }}" \
+            --output results/result.json \
+            2>&1 | tee "logs/${{ matrix.box }}.log"
+      - name: Add exact status to job summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          path = Path("results/result.json")
+          if not path.exists():
+              print("## ERROR\n\nNo result JSON was produced.")
+          else:
+              r = json.loads(path.read_text())
+              print(f"## {r['box']}: {r['status']}")
+              print(f"\n- `h={r['h']}`")
+              print(f"- weights: `{r['weight_multiset']}`")
+              print(f"- solver: `{r['solver_status']}`")
+              print(f"- wall seconds: `{r['wall_seconds']}`")
+              print(f"- branches: `{r['branches']}`")
+              print(f"- conflicts: `{r['conflicts']}`")
+              if r["status"] == "SAT":
+                  print("- expanded K16 witness: independently verified")
+              elif r["status"] == "UNKNOWN":
+                  print("- this box remains open; it is not an UNSAT result")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: weighted-ladder-${{ matrix.box }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Make incomplete/error status visible
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("results/result.json")
+          if not path.exists():
+              raise SystemExit("ERROR: no result JSON")
+          status = json.loads(path.read_text()).get("status")
+          if status == "UNKNOWN":
+              raise SystemExit("UNKNOWN: exact box remains open")
+          if status == "ERROR":
+              raise SystemExit("ERROR: solver/model failure")
+          print(f"Exact logical status: {status}")
+          PY
+
+  aggregate:
+    name: Aggregate all returned evidence
+    needs: [plan, solve]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: weighted-ladder-h*
+          path: downloaded
+          merge-multiple: false
+      - name: Aggregate exact statuses
+        shell: bash
+        run: |
+          mkdir -p aggregate
+          python scripts/aggregate_weighted_ladder.py \
+            downloaded --output aggregate/summary.json \
+            2>&1 | tee aggregate/aggregate.log
+      - name: Publish campaign summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          path = Path("aggregate/summary.json")
+          if not path.exists():
+              print("## Aggregate failed")
+          else:
+              r = json.loads(path.read_text())
+              print(f"## Weighted ladder: {r['status']}")
+              print(f"\n- returned: `{r['returned_patterns']}/29`")
+              print(f"- counts: `{r['status_counts']}`")
+              print(f"- SAT: `{r['sat_boxes']}`")
+              print(f"- UNKNOWN: `{r['unknown_boxes']}`")
+              print(f"- missing: `{r['missing_boxes']}`")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: weighted-ladder-aggregate
+          path: aggregate/
+          retention-days: 90

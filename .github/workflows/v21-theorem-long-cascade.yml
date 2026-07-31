@@ -1,0 +1,423 @@
+name: K16 v21 theorem-cut long cascade
+
+on:
+  workflow_dispatch:
+    inputs:
+      v20_run_id:
+        description: "Completed V20 run whose signed ledger is resumed"
+        required: true
+        default: "30339871567"
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/v21-theorem-long-cascade.yml"
+      - "scripts/k16_theorem_cascade.py"
+      - "scripts/k16_theorem_cuts.py"
+      - "scripts/verify_primitive_witness.py"
+      - "docs/V21_THEOREM_LONG_CASCADE.md"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: k16-v21-theorem-long-cascade
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  V18_RUN_ID: "30332755449"
+  V20_RUN_ID: ${{ inputs.v20_run_id || '30339871567' }}
+
+jobs:
+  plan:
+    name: Verify theorem cuts and filter the 81 V20 open leaves
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the exact SAT binding
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Download the complete V18 source
+        uses: actions/download-artifact@v4
+        with:
+          name: v18-smart-deepen-source
+          path: prior/v18-source
+          run-id: ${{ env.V18_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download the final V20 ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v20-cascade-ledger
+          path: prior/v20-ledger
+          run-id: ${{ env.V20_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Reuse the pinned V20 CaDiCaL binary
+        uses: actions/download-artifact@v4
+        with:
+          name: v20-cascade-source
+          path: prior/v20-source
+          run-id: ${{ env.V20_RUN_ID }}
+          github-token: ${{ github.token }}
+      - id: matrix
+        name: Build theorem CNFs, run gates, and unit-filter leaves
+        shell: bash
+        run: |
+          set -o pipefail
+          v20_ledger="$(find prior/v20-ledger -name \
+            'v20-cascade-ledger.json' -type f -print -quit)"
+          test -n "$v20_ledger"
+          python scripts/k16_theorem_cascade.py \
+            --plan \
+            --v18-source prior/v18-source \
+            --v20-ledger "$v20_ledger" \
+            --cadical-source prior/v20-source \
+            --v18-run-id "$V18_RUN_ID" \
+            --v20-run-id "$V20_RUN_ID" \
+            --output v21-source \
+            --matrix-output v21-cadical-matrix.json \
+            | tee v21-plan.log
+          matrix="$(tr -d '\n' < v21-cadical-matrix.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v21-cadical-matrix.json"))["include"]))')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          r = json.loads(Path("v21-source/v21-manifest.json").read_text())
+          b = r["baseline"]
+          budgets = Counter(t["seconds"] for t in r["cadical_tasks"])
+          print("## V21 theorem-cut plan")
+          print(f"\n- V20 permanent closures retained: `{b['v20_closed']}`")
+          print(f"- V20 logical UNKNOWN input: `{b['v20_open']}`")
+          print(
+              f"- new unit-propagation closures: "
+              f"`{b['unit_propagation_new_closed']}`"
+          )
+          print(f"- long CaDiCaL tasks: `{b['open_before_cadical']}`")
+          print(f"- CaDiCaL budget distribution: `{dict(budgets)}`")
+          print(f"- correctness gates: `{r['gates']}`")
+          print(
+              "\nNo empirical or unproved cut is present. "
+              "UNKNOWN remains open."
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v21-theorem-source
+          path: v21-source/
+          if-no-files-found: error
+          retention-days: 90
+
+  cadical:
+    name: ${{ matrix.task_id }}
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v21-theorem-source
+          path: source
+      - name: Run one theorem-strengthened CaDiCaL leaf
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x source/cadical/cadical
+          mkdir -p results logs
+          python scripts/k16_theorem_cascade.py \
+            --solve \
+            --source source \
+            --manifest source/v21-manifest.json \
+            --task-id "${{ matrix.task_id }}" \
+            --result "results/${{ matrix.task_id }}.json" \
+            --log "logs/${{ matrix.task_id }}.log" \
+            --output results/unused.json \
+            2>&1 | tee "logs/${{ matrix.task_id }}-wrapper.log"
+      - name: Publish logical status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          paths = list(Path("results").glob("*.json"))
+          if not paths:
+              print("## Infrastructure error\n\nNo signed result.")
+          else:
+              r = json.loads(paths[0].read_text())
+              print(f"## {r['task_id']}: {r['status']}")
+              print(
+                  f"\n- budget class: `{r['complexity_class']}`"
+                  f", depth: `{r['cube_depth']}`"
+              )
+              print(
+                  f"- seconds: `{r['seconds']}` / "
+                  f"`{r['time_limit_seconds']}`"
+              )
+              print(f"- exact UNSAT closure: `{r['solver_level_exact']}`")
+              if r["status"] == "UNKNOWN":
+                  print("- UNKNOWN advances to the longer SMS stage")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v21-cadical-result-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+
+  select-sms:
+    name: Remove CaDiCaL closures and build the 60-120 minute SMS matrix
+    needs:
+      - plan
+      - cadical
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v21-theorem-source
+          path: source
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.count != '0'
+        with:
+          pattern: v21-cadical-result-*
+          path: cadical-results
+      - id: matrix
+        name: Pass only logical UNKNOWN leaves to SMS
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p cadical-results
+          python scripts/k16_theorem_cascade.py \
+            --select-sms \
+            --source source \
+            --cadical-results-root cadical-results \
+            --output v21-stage \
+            --matrix-output v21-sms-matrix.json \
+            | tee v21-select-sms.log
+          matrix="$(tr -d '\n' < v21-sms-matrix.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v21-sms-matrix.json"))["include"]))')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          r = json.loads(
+              Path("v21-stage/v21-cadical-stage-ledger.json").read_text()
+          )
+          m = json.loads(Path("v21-stage/v21-sms-manifest.json").read_text())
+          budgets = Counter(t["seconds"] for t in m["sms_tasks"])
+          print("## V21 CaDiCaL filter")
+          print(f"\n- statuses: `{r['statuses']}`")
+          print(f"- exact closures: `{len(r['exact_closed_queue_ids'])}`")
+          print(f"- SMS tasks: `{len(r['unknown_queue_ids'])}`")
+          print(f"- SMS budget distribution: `{dict(budgets)}`")
+          print("\nSAT and UNSAT leaves are never resubmitted.")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v21-cadical-stage
+          path: v21-stage/
+          if-no-files-found: error
+          retention-days: 90
+
+  sms:
+    name: ${{ matrix.task_id }}
+    needs: select-sms
+    if: needs.select-sms.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 140
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.select-sms.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v21-theorem-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          name: v21-cadical-stage
+          path: stage
+      - name: Run one theorem-strengthened long SMS leaf
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x source/bundle/smsg
+          export LD_LIBRARY_PATH="$PWD/source/bundle/lib:${LD_LIBRARY_PATH:-}"
+          mkdir -p results logs
+          python scripts/k16_theorem_cascade.py \
+            --solve \
+            --source source \
+            --manifest stage/v21-sms-manifest.json \
+            --task-id "${{ matrix.task_id }}" \
+            --result "results/${{ matrix.task_id }}.json" \
+            --log "logs/${{ matrix.task_id }}.log" \
+            --output results/unused.json \
+            2>&1 | tee "logs/${{ matrix.task_id }}-wrapper.log"
+      - name: Publish logical status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          paths = list(Path("results").glob("*.json"))
+          if not paths:
+              print("## Infrastructure error\n\nNo signed result.")
+          else:
+              r = json.loads(paths[0].read_text())
+              print(f"## {r['task_id']}: {r['status']}")
+              print(
+                  f"\n- budget class: `{r['complexity_class']}`"
+                  f", depth: `{r['cube_depth']}`"
+              )
+              print(
+                  f"- seconds: `{r['seconds']}` / "
+                  f"`{r['time_limit_seconds']}`"
+              )
+              print(f"- exact UNSAT closure: `{r['solver_level_exact']}`")
+              if r["status"] == "UNKNOWN":
+                  print("- UNKNOWN remains logically open")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v21-sms-result-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+
+  aggregate:
+    name: Publish the resumable exact V21 ledger
+    needs:
+      - plan
+      - select-sms
+      - sms
+    if: >-
+      always() &&
+      needs.plan.result == 'success' &&
+      needs.select-sms.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v21-theorem-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          name: v21-cadical-stage
+          path: stage
+      - name: Download SMS results
+        if: needs.select-sms.outputs.count != '0'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v21-sms-result-*
+          path: sms-results
+      - name: Merge only exact closures into the V21 ledger
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p sms-results aggregate
+          python scripts/k16_theorem_cascade.py \
+            --aggregate \
+            --source source \
+            --cadical-stage-ledger \
+              stage/v21-cadical-stage-ledger.json \
+            --sms-results-root sms-results \
+            --workflow-run-id "${{ github.run_id }}" \
+            --output aggregate/v21-theorem-cascade-ledger.json \
+            | tee aggregate/v21-theorem-cascade-ledger.log
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(
+              Path("aggregate/v21-theorem-cascade-ledger.json").read_text()
+          )
+          print("## V21 theorem-cut long cascade verdict")
+          print(f"\n- conclusion: `{r['logical_conclusion']}`")
+          print(
+              f"- new unit closures: "
+              f"`{r['unit_stage']['new_exact_closures']}`"
+          )
+          print(
+              f"- new CaDiCaL closures: "
+              f"`{r['cadical_stage']['new_exact_closures']}`"
+          )
+          print(
+              f"- new SMS closures: "
+              f"`{r['sms_stage']['new_exact_closures']}`"
+          )
+          print(f"- total closed leaves: `{r['closed_count']}` / 139")
+          print(f"- remaining logical UNKNOWN: `{r['open_count']}`")
+          print(f"- verified SAT witnesses: `{len(r['verified_sat_witnesses'])}`")
+          print("\nUNKNOWN is not an exclusion; the ledger is resumable.")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v21-theorem-cascade-ledger
+          path: aggregate/
+          if-no-files-found: error
+          retention-days: 90

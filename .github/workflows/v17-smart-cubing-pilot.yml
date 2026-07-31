@@ -1,0 +1,404 @@
+name: K16 v17 SMS-aware smart-cubing pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      prerun_seconds:
+        description: SMS learning time before each root is cubed
+        required: true
+        default: "600"
+      cube_seconds:
+        description: SMS conquer time for each sampled cube
+        required: true
+        default: "300"
+      sample_size:
+        description: Stratified cubes sampled per root and strategy
+        required: true
+        default: "16"
+      edge_cutoff:
+        description: Assigned directed-arc cutoff for both cubers
+        required: true
+        default: "32"
+  pull_request:
+    paths:
+      - ".github/workflows/v17-smart-cubing-pilot.yml"
+      - "patches/sms-v17-smart-cubing.patch"
+      - "scripts/k16_smart_cubing.py"
+      - "scripts/k16_primitive_sms.py"
+      - "scripts/verify_primitive_witness.py"
+      - "scripts/h14_module3_sms.py"
+      - "pisa_verify.py"
+      - "requirements-sat.txt"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k16-v17-smart-cubing-pilot
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  SMS_COMMIT: 464f12f1fd36b496e7ba9dcbb622b079de02dce4
+  PRERUN_SECONDS: ${{ inputs.prerun_seconds || '600' }}
+  CUBE_SECONDS: ${{ inputs.cube_seconds || '300' }}
+  SAMPLE_SIZE: ${{ inputs.sample_size || '16' }}
+  EDGE_CUTOFF: ${{ inputs.edge_cutoff || '32' }}
+
+jobs:
+  build-gate:
+    name: Build patched SMS and run exact gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install exact-search dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements-sat.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential cmake libboost-graph-dev \
+            libboost-program-options-dev
+      - name: Run primitive encoding and independent-verifier gates
+        run: |
+          set -o pipefail
+          mkdir -p gates
+          python scripts/k16_primitive_sms.py \
+            --gates --output gates/model-gates.json \
+            2>&1 | tee gates/model-gates.log
+      - name: Build pinned SMS with the audited v17 cubing patch
+        run: |
+          git clone --recursive \
+            https://github.com/markirch/sat-modulo-symmetries.git \
+            tools/sms
+          git -C tools/sms checkout "$SMS_COMMIT"
+          git -C tools/sms submodule update --init --recursive
+          git -C tools/sms apply \
+            "$GITHUB_WORKSPACE/patches/sms-v17-smart-cubing.patch"
+          git -C tools/sms diff --check
+          grep -q "Cube result:" tools/sms/src/sms.cpp
+          grep -q "lookaheadOnlyEdgeVars" tools/sms/src/cubing.cpp
+          (
+            cd tools/sms/cadical_sms
+            ./configure -fPIC
+            make -j4
+          )
+          cmake -S tools/sms -B tools/sms/build \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build tools/sms/build -j4
+          test -x tools/sms/build/src/smsg
+          mkdir -p bundle/lib
+          cp tools/sms/build/src/smsg bundle/smsg
+          ldd tools/sms/build/src/smsg | tee gates/smsg-ldd.txt
+          ldd tools/sms/build/src/smsg \
+            | awk '/libboost_/ {print $3}' \
+            | xargs -r -I '{}' cp '{}' bundle/lib/
+          test -n "$(find bundle/lib -maxdepth 1 -name 'libboost_*' -print -quit)"
+      - name: Verify directed SMS mode after patching
+        run: |
+          set -o pipefail
+          python scripts/k16_primitive_sms.py \
+            --sms-gates \
+            --binary tools/sms/build/src/smsg \
+            --output gates/sms-gates.json \
+            2>&1 | tee gates/sms-gates.log
+      - name: Patch-specific edge-cutoff and cube-result smoke gate
+        shell: bash
+        run: |
+          set -o pipefail
+          cat > gates/tiny.cnf <<'EOF'
+          p cnf 12 12
+          1 4 0
+          -1 -4 0
+          2 7 0
+          -2 -7 0
+          3 10 0
+          -3 -10 0
+          5 8 0
+          -5 -8 0
+          6 11 0
+          -6 -11 0
+          9 12 0
+          -9 -12 0
+          EOF
+          timeout 30 tools/sms/build/src/smsg \
+            --vertices 4 --directed --dimacs gates/tiny.cnf \
+            --assignment-cutoff 4 --lookahead-only-edge-vars \
+            --cube-only-decisions \
+            > gates/cubing-patch.log 2>&1
+          grep -Eq '^Decisions:[[:space:]]+-?[0-9]+' gates/cubing-patch.log
+          awk '/^Decisions:/ {
+            printf "a";
+            for (i=2; i<=NF; i++) printf " %s", $i;
+            print " 0";
+            exit
+          }' gates/cubing-patch.log > gates/tiny.cubes
+          tools/sms/build/src/smsg \
+            --vertices 4 --directed --dimacs gates/tiny.cnf \
+            --cube-file gates/tiny.cubes --cube-line 1 --cube-timeout 10 \
+            > gates/cube-result-patch.log 2>&1
+          grep -Eq 'Cube result: (10|20)' gates/cube-result-patch.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v17-smart-sms-binary-and-gates
+          path: |
+            bundle/
+            gates/
+          retention-days: 90
+
+  partition:
+    name: Smart partitions for full_s16-${{ matrix.box }}
+    needs: build-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        box:
+          - a1_z3
+          - a2p_z4p
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v17-smart-sms-binary-and-gates
+          path: sms
+      - name: Learn symmetry clauses and compare two complete cubers
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x sms/bundle/smsg
+          export LD_LIBRARY_PATH="$PWD/sms/bundle/lib:${LD_LIBRARY_PATH:-}"
+          mkdir -p "prepared/${{ matrix.box }}"
+          python scripts/k16_smart_cubing.py \
+            --prepare \
+            --binary sms/bundle/smsg \
+            --box "${{ matrix.box }}" \
+            --work "prepared/${{ matrix.box }}" \
+            --prerun-seconds "$PRERUN_SECONDS" \
+            --cuber-prerun-seconds 30 \
+            --cutoff "$EDGE_CUTOFF" \
+            --partition-seconds 900 \
+            --coverage-seconds 600 \
+            2>&1 | tee "prepared/${{ matrix.box }}/wrapper.log"
+      - name: Publish partition summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+          from pathlib import Path
+
+          box = os.environ["BOX"]
+          path = Path("prepared") / box / "manifest.json"
+          if not path.exists():
+              print(f"## {box}: ERROR\n\nNo partition manifest.")
+          else:
+              r = json.loads(path.read_text())
+              print(f"## {r['root_slice_id']}: {r['root_status']}")
+              for name, p in r.get("partitions", {}).items():
+                  print(
+                      f"\n- `{name}`: {p['cubes']} cubes; "
+                      f"generator complete `{p['generator_complete']}`; "
+                      f"coverage `{p['coverage']['status']}`; "
+                      f"depth `{p['decision_depth']}`"
+                  )
+          PY
+        env:
+          BOX: ${{ matrix.box }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v17-smart-partition-${{ matrix.box }}
+          path: prepared/${{ matrix.box }}/
+          if-no-files-found: error
+          retention-days: 90
+
+  plan:
+    name: Select stratified pilot leaves
+    needs: partition
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v17-smart-partition-*
+          path: partitions
+      - id: matrix
+        name: Build exact sample matrix
+        shell: bash
+        run: |
+          mapfile -t manifests < <(find partitions -name manifest.json -type f | sort)
+          args=()
+          for path in "${manifests[@]}"; do
+            args+=(--manifest "$path")
+          done
+          matrix="$(python scripts/k16_smart_cubing.py \
+            --matrix --sample-size "$SAMPLE_SIZE" "${args[@]}")"
+          count="$(python -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))' \
+            <<< "$matrix")"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Selected $count exact cube leaves." >> "$GITHUB_STEP_SUMMARY"
+
+  conquer:
+    name: Conquer ${{ matrix.cube_id }}
+    needs:
+      - build-gate
+      - plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v17-smart-sms-binary-and-gates
+          path: sms
+      - uses: actions/download-artifact@v4
+        with:
+          name: v17-smart-partition-${{ matrix.box }}
+          path: prepared
+      - name: Solve one SMS-canonical cube leaf
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x sms/bundle/smsg
+          export LD_LIBRARY_PATH="$PWD/sms/bundle/lib:${LD_LIBRARY_PATH:-}"
+          mkdir -p results logs
+          manifest="$(find prepared -name manifest.json -type f -print -quit)"
+          test -n "$manifest"
+          work_dir="$(dirname "$manifest")"
+          python scripts/k16_smart_cubing.py \
+            --solve-cube \
+            --binary sms/bundle/smsg \
+            --box "${{ matrix.box }}" \
+            --strategy "${{ matrix.strategy }}" \
+            --work "$work_dir" \
+            --cube-line "${{ matrix.cube_line }}" \
+            --cube-seconds "$CUBE_SECONDS" \
+            --result "results/${{ matrix.cube_id }}.json" \
+            --log "logs/${{ matrix.cube_id }}.log" \
+            2>&1 | tee "logs/${{ matrix.cube_id }}-wrapper.log"
+      - name: Publish exact leaf status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          paths = list(Path("results").glob("*.json"))
+          if not paths:
+              print("## ERROR\n\nNo cube result was produced.")
+          else:
+              r = json.loads(paths[0].read_text())
+              print(f"## {r['cube_id']}: {r['status']}")
+              print(f"\n- strategy: `{r['strategy']}`")
+              print(f"- decision depth: `{r['cube_depth']}`")
+              print(f"- seconds: `{r['seconds']}`")
+              print(f"- exact UNSAT closure: `{r['solver_level_exact']}`")
+              if r["status"] == "UNKNOWN":
+                  print("- this leaf remains open and will be split, not rerun")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v17-smart-result-${{ matrix.cube_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+
+  aggregate:
+    name: Build the persistent v17 pilot ledger
+    needs:
+      - partition
+      - conquer
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v17-smart-partition-*
+          path: downloaded/partitions
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v17-smart-result-*
+          path: downloaded/results
+      - name: Aggregate without treating UNKNOWN as exclusion
+        shell: bash
+        run: |
+          mkdir -p downloaded/results
+          mapfile -t manifests < <(find downloaded/partitions -name manifest.json -type f | sort)
+          mapfile -t results < <(find downloaded/results -name '*.json' -type f | sort)
+          args=()
+          for path in "${manifests[@]}"; do
+            args+=(--manifest "$path")
+          done
+          for path in "${results[@]}"; do
+            args+=(--result-input "$path")
+          done
+          mkdir -p aggregate
+          python scripts/k16_smart_cubing.py \
+            --summarize "${args[@]}" \
+            --result aggregate/v17-smart-cubing-pilot-ledger.json \
+            | tee aggregate/v17-smart-cubing-pilot-ledger.log
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          r = json.loads(
+              Path("aggregate/v17-smart-cubing-pilot-ledger.json").read_text()
+          )
+          print("## v17 SMS-aware smart-cubing pilot")
+          print(f"\n- conclusion: `{r['logical_conclusion']}`")
+          print(f"- recommended strategy: `{r['recommended_strategy']}`")
+          print(f"- strategy results: `{r['strategy_summary']}`")
+          print(
+              "- UNKNOWN leaves remain open and are the only leaves eligible "
+              "for the next recursive split."
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v17-smart-cubing-pilot-ledger
+          path: aggregate/
+          retention-days: 90

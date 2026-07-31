@@ -1,0 +1,143 @@
+name: K16 reusable exact solver lane
+
+on:
+  workflow_call:
+    inputs:
+      matrix:
+        description: "JSON matrix containing signed V24-B child tasks"
+        required: true
+        type: string
+      solver:
+        description: "cadical or kissat"
+        required: true
+        type: string
+      source_artifact:
+        description: "Group-specific immutable V24-B source artifact"
+        required: true
+        type: string
+      manifest_artifact:
+        description: "Optional stage artifact containing a fallback manifest"
+        required: false
+        default: ""
+        type: string
+      manifest_path:
+        description: "Manifest path after artifact download"
+        required: true
+        type: string
+      result_prefix:
+        description: "Unique artifact prefix for solver results"
+        required: true
+        type: string
+      max_parallel:
+        description: "Runner allocation for this lane"
+        required: true
+        type: number
+      script:
+        description: "Campaign solver script"
+        required: false
+        default: "scripts/k16_v24b_seven_root_conquer.py"
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  solve:
+    name: ${{ inputs.solver }} ${{ matrix.task_id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.max_parallel }}
+      matrix: ${{ fromJSON(inputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Download the immutable group source
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.source_artifact }}
+          path: source
+      - name: Download the fallback manifest
+        if: inputs.manifest_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.manifest_artifact }}
+          path: stage
+      - name: Run one exact signed child for up to 60 minutes
+        shell: bash
+        run: |
+          set -o pipefail
+          test "${{ inputs.solver }}" = "cadical" || \
+            test "${{ inputs.solver }}" = "kissat"
+          chmod +x "source/${{ inputs.solver }}/${{ inputs.solver }}"
+          mkdir -p results logs
+          python "${{ inputs.script }}" \
+            --solve \
+            --source source \
+            --manifest "${{ inputs.manifest_path }}" \
+            --task-id "${{ matrix.task_id }}" \
+            --result "results/${{ matrix.task_id }}.json" \
+            --log "logs/${{ matrix.task_id }}.log" \
+            2>&1 | tee "logs/${{ matrix.task_id }}-wrapper.log"
+      - name: Publish the logical status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          paths = list(Path("results").glob("*.json"))
+          if not paths:
+              print("## Infrastructure error\n\nNo signed result was written.")
+          else:
+              r = json.loads(paths[0].read_text())
+              print(f"## {r['task_id']}: {r['status']}")
+              print(f"\n- box: `{r['box']}`")
+              source_leaf = r.get(
+                  "v23_source_leaf_id",
+                  r.get("source_leaf_id"),
+              )
+              print(f"- V23 source leaf: `{source_leaf}`")
+              print(f"- complete split path: `{r['split_path']}`")
+              print(
+                  f"- seconds: `{r['seconds']}` / "
+                  f"`{r['time_limit_seconds']}`"
+              )
+              print(f"- exact UNSAT closure: `{r['solver_level_exact']}`")
+              print(f"- independently verified SAT: `{r['verified']}`")
+              if r["status"] == "UNKNOWN":
+                  print("\nUNKNOWN stays open; it is never counted as exclusion.")
+          PY
+      - id: upload-result
+        uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: ${{ inputs.result_prefix }}-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Retry artifact upload after a transient failure
+        uses: actions/upload-artifact@v4
+        if: always() && steps.upload-result.outcome == 'failure'
+        with:
+          name: ${{ inputs.result_prefix }}-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true

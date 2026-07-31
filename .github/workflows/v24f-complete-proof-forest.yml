@@ -1,0 +1,553 @@
+name: K16 v24-F complete DRAT and LRAT proof forest
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Pilot samples or one formal sixth of the proof forest"
+        required: true
+        default: pilot
+        type: choice
+        options:
+          - pilot
+          - formal
+      wave:
+        description: "Formal wave 1..6 (ignored in pilot mode)"
+        required: true
+        default: "1"
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/v24f-complete-proof-forest.yml"
+      - "scripts/k16_v24f_full_certificates.py"
+      - "docs/V24F_COMPLETE_PROOF_FOREST.md"
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: >-
+    k16-v24f-${{ inputs.mode || 'pilot' }}-${{ inputs.wave || '1' }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  V23_RUN_ID: "30417759253"
+  V24B_RUN_ID: "30490334948"
+  V24C_RUN_ID: "30587970184"
+  V24D_RUN_ID: "30602758451"
+  DRAT_TRIM_COMMIT: "2e3b2dc0ecf938addbd779d42877b6ed69d9a985"
+  CAMPAIGN_MODE: ${{ inputs.mode || 'pilot' }}
+  CAMPAIGN_WAVE: ${{ inputs.wave || '1' }}
+
+jobs:
+  plan:
+    name: Reconstruct and audit the complete 1124-terminal forest
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      selected_count: ${{ steps.plan.outputs.selected_count }}
+      forest_sha256: ${{ steps.plan.outputs.forest_sha256 }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Verify immutable historical run identities
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_run() {
+            local run_id="$1"
+            local expected_sha="$2"
+            local actual_sha conclusion
+            actual_sha="$(
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+                --jq '.head_sha'
+            )"
+            conclusion="$(
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+                --jq '.conclusion'
+            )"
+            test "$actual_sha" = "$expected_sha"
+            test "$conclusion" = "success"
+          }
+          check_run \
+            "$V23_RUN_ID" \
+            "d25d25169f216f36da9c12766493049d376eb0d7"
+          check_run \
+            "$V24B_RUN_ID" \
+            "1ef79e1343ee510247fbfae566741ced4a4acc60"
+          check_run \
+            "$V24C_RUN_ID" \
+            "be45be4731385dfc8d34fa718fccd98b141bc00b"
+          check_run \
+            "$V24D_RUN_ID" \
+            "7e639de2d6b68ec903e375c8f05dfa593b89f5d2"
+      - name: Download V23 final ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v23-cleanup-ledger
+          path: prior/v23-ledger
+          run-id: ${{ env.V23_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download V24-B frozen source
+        uses: actions/download-artifact@v4
+        with:
+          name: v24b-source
+          path: prior/v24b-source
+          run-id: ${{ env.V24B_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download V24-B final ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24b-ledger
+          path: prior/v24b-ledger
+          run-id: ${{ env.V24B_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download V24-C frozen source
+        uses: actions/download-artifact@v4
+        with:
+          name: v24c-source
+          path: prior/v24c-source
+          run-id: ${{ env.V24C_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download V24-C final ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24c-ledger
+          path: prior/v24c-ledger
+          run-id: ${{ env.V24C_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download V24-D frozen source
+        uses: actions/download-artifact@v4
+        with:
+          name: v24d-source
+          path: prior/v24d-source
+          run-id: ${{ env.V24D_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download V24-D final ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24d-ledger
+          path: prior/v24d-ledger
+          run-id: ${{ env.V24D_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Build pinned independent proof checkers
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git init checker-source
+          git -C checker-source remote add origin \
+            https://github.com/marijnheule/drat-trim.git
+          git -C checker-source fetch --depth 1 origin "$DRAT_TRIM_COMMIT"
+          git -C checker-source checkout --detach FETCH_HEAD
+          test "$(git -C checker-source rev-parse HEAD)" = "$DRAT_TRIM_COMMIT"
+          make -C checker-source
+          mkdir -p checkers
+          cp checker-source/drat-trim checker-source/lrat-check checkers/
+      - id: plan
+        name: Materialize hashes and select the requested wave
+        shell: bash
+        run: |
+          set -euo pipefail
+          v23_ledger="$(
+            find prior/v23-ledger -name v23-cleanup-ledger.json \
+              -type f -print -quit
+          )"
+          v24b_ledger="$(
+            find prior/v24b-ledger -name v24b-ledger.json \
+              -type f -print -quit
+          )"
+          v24c_ledger="$(
+            find prior/v24c-ledger -name v24c-ledger.json \
+              -type f -print -quit
+          )"
+          v24d_ledger="$(
+            find prior/v24d-ledger -name v24d-ledger.json \
+              -type f -print -quit
+          )"
+          test -n "$v23_ledger"
+          test -n "$v24b_ledger"
+          test -n "$v24c_ledger"
+          test -n "$v24d_ledger"
+          python scripts/k16_v24f_full_certificates.py \
+            --plan \
+            --v23-ledger "$v23_ledger" \
+            --v24b-source prior/v24b-source \
+            --v24b-ledger "$v24b_ledger" \
+            --v24c-source prior/v24c-source \
+            --v24c-ledger "$v24c_ledger" \
+            --v24d-source prior/v24d-source \
+            --v24d-ledger "$v24d_ledger" \
+            --checker-root checkers \
+            --mode "$CAMPAIGN_MODE" \
+            --wave "$CAMPAIGN_WAVE" \
+            --output v24f-source \
+            --matrix v24f-matrix.json \
+            | tee v24f-plan.log
+          matrix="$(tr -d '\n' < v24f-matrix.json)"
+          selected_count="$(
+            python -c \
+              'import json; print(len(json.load(open("v24f-matrix.json"))["include"]))'
+          )"
+          forest_sha256="$(
+            python -c \
+              'import json; print(json.load(open("v24f-source/v24f-certificate-manifest.json"))["forest_sha256"])'
+          )"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "selected_count=$selected_count" >> "$GITHUB_OUTPUT"
+          echo "forest_sha256=$forest_sha256" >> "$GITHUB_OUTPUT"
+      - id: release
+        name: Prepare a durable draft release for a formal wave
+        if: env.CAMPAIGN_MODE == 'formal'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          forest_sha256="$(
+            python -c \
+              'import json; print(json.load(open("v24f-source/v24f-certificate-manifest.json"))["forest_sha256"])'
+          )"
+          tag="v24f-${forest_sha256:0:12}-w${CAMPAIGN_WAVE}-${GITHUB_SHA:0:8}"
+          title="K16 V24-F certificate wave ${CAMPAIGN_WAVE}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --draft \
+              --target "$GITHUB_SHA" \
+              --title "$title" \
+              --notes "Durable LRAT certificates for V24-F formal wave ${CAMPAIGN_WAVE}. Forest SHA-256: ${forest_sha256}."
+          fi
+          tar -C v24f-source -czf v24f-source.tar.gz .
+          gh release upload "$tag" v24f-source.tar.gz --clobber
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Publish plan summary
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          p = json.loads(
+              Path("v24f-source/v24f-certificate-manifest.json").read_text()
+          )
+          m = json.loads(Path("v24f-matrix.json").read_text())
+          print("## V24-F complete proof-forest plan")
+          print(f"\n- mode: `${{ env.CAMPAIGN_MODE }}`")
+          print(f"- requested wave: `${{ env.CAMPAIGN_WAVE }}`")
+          print(f"- selected certificates: `{len(m['include'])}`")
+          print(
+              f"- complete terminal forest: "
+              f"`{p['coverage']['terminal_certificate_tasks']}`"
+          )
+          print(
+              f"- original partition coverage: "
+              f"`{p['coverage']['original_partition_leaves']} / 676`"
+          )
+          print(f"- forest SHA-256: `{p['forest_sha256']}`")
+          print(f"- stage counts: `{p['stage_counts']}`")
+          print(f"- formal wave counts: `{p['wave_counts']}`")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: >-
+            v24f-source-${{ env.CAMPAIGN_MODE }}-w${{ env.CAMPAIGN_WAVE }}
+          path: |
+            v24f-source/
+            v24f-matrix.json
+            v24f-plan.log
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+  certify:
+    name: Certify ${{ matrix.certificate_task_id }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      max-parallel: 18
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Install proof compression utility
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd
+      - uses: actions/download-artifact@v4
+        with:
+          name: >-
+            v24f-source-${{ env.CAMPAIGN_MODE }}-w${{ env.CAMPAIGN_WAVE }}
+          path: source-download
+      - name: Generate and independently check DRAT and LRAT
+        shell: bash
+        run: |
+          set -o pipefail
+          source_dir="source-download/v24f-source"
+          chmod +x \
+            "$source_dir/solver/cadical" \
+            "$source_dir/checker/drat-trim" \
+            "$source_dir/checker/lrat-check"
+          python scripts/k16_v24f_full_certificates.py \
+            --certify \
+            --source "$source_dir" \
+            --certificate-task-id \
+              "${{ matrix.certificate_task_id }}" \
+            $(
+              if [[ "$CAMPAIGN_MODE" == "formal" ]]; then
+                printf '%s' "--publication-mode"
+              fi
+            ) \
+            --output certificate \
+            2>&1 | tee certificate-wrapper.log
+      - name: Publish certificate status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          path = Path("certificate/certificate-result.json")
+          if not path.exists():
+              print("## Certificate generation failed")
+          else:
+              r = json.loads(path.read_text())
+              print(f"## {r['certificate_task_id']}: {r['status']}")
+              print(f"\n- stage: `{r['stage']}`")
+              print(f"- box: `{r['box']}`")
+              print(f"- CNF SHA-256: `{r['assumption_cnf_sha256']}`")
+              print(f"- DRAT checked: `{r['drat_trim']['verified']}`")
+              print(f"- LRAT checked: `{r['lrat_check']['verified']}`")
+              print(
+                  f"- compressed proof bytes: "
+                  f"`{r['certificates']['drat']['compressed_bytes'] + r['certificates']['lrat']['compressed_bytes']}`"
+              )
+          PY
+      - name: Upload durable LRAT parts to the formal wave release
+        if: env.CAMPAIGN_MODE == 'formal'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p durable-release
+          cp certificate/release-payload/* durable-release/
+          cp \
+            certificate/certificate-result.json \
+            "durable-release/${{ matrix.certificate_task_id }}.json"
+          for attempt in 1 2 3; do
+            if gh release upload \
+              "$RELEASE_TAG" \
+              durable-release/* \
+              --clobber; then
+              exit 0
+            fi
+            sleep $((attempt * 15))
+          done
+          exit 1
+      - id: receipt_upload
+        uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: >-
+            v24f-receipt-${{ matrix.certificate_task_id }}
+          path: certificate/certificate-result.json
+          if-no-files-found: warn
+          retention-days: 90
+          compression-level: 0
+      - name: Retry receipt upload
+        uses: actions/upload-artifact@v4
+        if: always() && steps.receipt_upload.outcome == 'failure'
+        with:
+          name: >-
+            v24f-receipt-${{ matrix.certificate_task_id }}
+          path: certificate/certificate-result.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: true
+      - id: proof_upload
+        uses: actions/upload-artifact@v4
+        if: always() && env.CAMPAIGN_MODE == 'pilot'
+        continue-on-error: true
+        with:
+          name: >-
+            v24f-proof-${{ matrix.certificate_task_id }}
+          path: |
+            certificate/*.zst
+            certificate/logs/
+            certificate-wrapper.log
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 0
+      - name: Retry proof upload
+        uses: actions/upload-artifact@v4
+        if: >-
+          always() &&
+          env.CAMPAIGN_MODE == 'pilot' &&
+          steps.proof_upload.outcome == 'failure'
+        with:
+          name: >-
+            v24f-proof-${{ matrix.certificate_task_id }}
+          path: |
+            certificate/*.zst
+            certificate/logs/
+            certificate-wrapper.log
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: true
+
+  aggregate:
+    name: Require every selected certificate and publish a wave ledger
+    needs:
+      - plan
+      - certify
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: >-
+            v24f-source-${{ env.CAMPAIGN_MODE }}-w${{ env.CAMPAIGN_WAVE }}
+          path: source-download
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v24f-receipt-*
+          path: receipts
+      - name: Aggregate only lightweight proof receipts
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p final
+          python scripts/k16_v24f_full_certificates.py \
+            --aggregate-wave \
+            --source source-download/v24f-source \
+            --results-root receipts \
+            --mode "$CAMPAIGN_MODE" \
+            --wave "$CAMPAIGN_WAVE" \
+            --workflow-run-id "${{ github.run_id }}" \
+            --release-tag "${{ needs.plan.outputs.release_tag }}" \
+            --output final/v24f-wave-ledger.json \
+            | tee final/v24f-wave-ledger.log
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(Path("final/v24f-wave-ledger.json").read_text())
+          print("## V24-F wave verdict")
+          print(f"\n- conclusion: `{r['logical_conclusion']}`")
+          print(f"- certificates: `{r['certificate_count']}`")
+          print(f"- DRAT verified: `{r['drat_verified']}`")
+          print(f"- LRAT verified: `{r['lrat_verified']}`")
+          print(f"- forest SHA-256: `{r['forest_sha256']}`")
+          PY
+      - name: Verify durable release assets and publish the formal wave
+        if: env.CAMPAIGN_MODE == 'formal'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --json assets > release-assets.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          assets = {
+              item["name"]: item
+              for item in json.loads(
+                  Path("release-assets.json").read_text()
+              )["assets"]
+          }
+          receipts = []
+          for path in Path("receipts").rglob("certificate-result.json"):
+              receipts.append(json.loads(path.read_text()))
+          expected = {"v24f-source.tar.gz"}
+          for receipt in receipts:
+              task_id = receipt["certificate_task_id"]
+              expected.add(f"{task_id}.json")
+              expected.update(
+                  part["file"]
+                  for part in receipt["publication_payload"]["release_parts"]
+              )
+          missing = sorted(expected - set(assets))
+          mismatched = []
+          for receipt in receipts:
+              for part in receipt["publication_payload"]["release_parts"]:
+                  asset = assets.get(part["file"])
+                  if not asset:
+                      continue
+                  if (
+                      int(asset["size"]) != int(part["bytes"])
+                      or asset.get("digest") != f"sha256:{part['sha256']}"
+                  ):
+                      mismatched.append(
+                          {
+                              "file": part["file"],
+                              "expected_bytes": part["bytes"],
+                              "actual_bytes": asset["size"],
+                              "expected_digest": (
+                                  f"sha256:{part['sha256']}"
+                              ),
+                              "actual_digest": asset.get("digest"),
+                          }
+                      )
+          unexpected_proof_count = len(
+              [
+                  name
+                  for name in assets
+                  if name.endswith(".lrat.zst.part000")
+              ]
+          )
+          if missing:
+              raise SystemExit(f"missing durable release assets: {missing}")
+          if mismatched:
+              raise SystemExit(
+                  f"durable LRAT asset mismatch: {mismatched}"
+              )
+          if unexpected_proof_count != len(receipts):
+              raise SystemExit(
+                  "release does not contain one LRAT payload per receipt"
+              )
+          print(
+              f"verified {len(receipts)} receipts and "
+              f"{len(expected)} durable assets"
+          )
+          PY
+          gh release edit "$RELEASE_TAG" --draft=false --latest=false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: >-
+            v24f-wave-ledger-${{ env.CAMPAIGN_MODE }}-w${{ env.CAMPAIGN_WAVE }}
+          path: final/
+          if-no-files-found: error
+          retention-days: 90

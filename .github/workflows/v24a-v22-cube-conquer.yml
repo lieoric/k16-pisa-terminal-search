@@ -1,0 +1,505 @@
+name: K16 v24-A V22-open cube-and-conquer
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Smoke checks one child with both solvers; formal runs all"
+        required: true
+        default: "smoke"
+        type: choice
+        options:
+          - smoke
+          - formal
+      v22_run_id:
+        description: "Completed V22 refinement run with 19 open children"
+        required: true
+        default: "30392007056"
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/v24a-v22-cube-conquer.yml"
+      - "scripts/k16_v24a_cube_conquer.py"
+      - "docs/V24A_V22_CUBE_CONQUER.md"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: k16-v24a-${{ inputs.mode }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  V22_RUN_ID: ${{ inputs.v22_run_id || '30392007056' }}
+  KISSAT_TAG: rel-4.0.4
+  KISSAT_COMMIT: 8af8e56f174b778aef3aa45af9f739b2a5f492c2
+
+jobs:
+  plan:
+    name: Audit V22 ledger and build 19 complete 8-way trees
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+      first_task: ${{ steps.matrix.outputs.first_task }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Download the immutable V22 source
+        uses: actions/download-artifact@v4
+        with:
+          name: v22-refine-source
+          path: prior/source
+          run-id: ${{ env.V22_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download the completed V22 ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v22-refine-ledger
+          path: prior/ledger
+          run-id: ${{ env.V22_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Build pinned Kissat
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 --branch "$KISSAT_TAG" \
+            https://github.com/arminbiere/kissat.git kissat-src
+          test "$(git -C kissat-src rev-parse HEAD)" = "$KISSAT_COMMIT"
+          (cd kissat-src && ./configure && make -j2)
+          mkdir -p kissat-bin
+          cp kissat-src/build/kissat kissat-bin/kissat
+          ./kissat-bin/kissat --version
+      - id: matrix
+        name: Build and audit the complete V24-A partition
+        shell: bash
+        run: |
+          set -o pipefail
+          ledger="$(find prior/ledger -name \
+            'v22-refine-ledger.json' -type f -print -quit)"
+          test -n "$ledger"
+          python scripts/k16_v24a_cube_conquer.py \
+            --plan \
+            --v22-source prior/source \
+            --v22-ledger "$ledger" \
+            --v22-run-id "$V22_RUN_ID" \
+            --kissat-binary kissat-bin/kissat \
+            --output v24a-source \
+            --matrix-output v24a-cadical-matrix.json \
+            | tee v24a-plan.log
+          matrix="$(tr -d '\n' < v24a-cadical-matrix.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v24a-cadical-matrix.json"))["include"]))')"
+          first_task="$(python -c \
+            'import json; print(json.load(open("v24a-cadical-matrix.json"))["include"][0]["task_id"])')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "first_task=$first_task" >> "$GITHUB_OUTPUT"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          r = json.loads(Path("v24a-source/v24a-manifest.json").read_text())
+          tasks = r["cadical_tasks"]
+          print("## V24-A exact plan")
+          print(f"\n- V22 UNKNOWN source leaves: `{len(r['trees'])}`")
+          print(f"- complete binary levels per source leaf: `3`")
+          print(f"- unit-closed children: `{len(r['unit_closed_children'])}`")
+          print(f"- queued solver children: `{len(tasks)}`")
+          print(f"- by box: `{dict(Counter(t['box'] for t in tasks))}`")
+          print(
+              f"- all coverage audits passed: "
+              f"`{r['coverage']['all_tree_audits_passed']}`"
+          )
+          print(
+              "\nEvery internal decision keeps both signs. No closed V22 "
+              "leaf is submitted."
+          )
+          PY
+      - name: Check both solver binaries
+        shell: bash
+        run: |
+          chmod +x v24a-source/cadical/cadical
+          chmod +x v24a-source/kissat/kissat
+          v24a-source/cadical/cadical --version
+          v24a-source/kissat/kissat --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24a-source
+          path: v24a-source/
+          if-no-files-found: error
+          retention-days: 90
+
+  smoke:
+    name: Ten-second CaDiCaL and Kissat environment gate
+    needs: plan
+    if: inputs.mode == 'smoke'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v24a-source
+          path: source
+      - name: Exercise CaDiCaL on one signed child
+        shell: bash
+        run: |
+          chmod +x source/cadical/cadical source/kissat/kissat
+          mkdir -p cadical/results cadical/logs
+          python scripts/k16_v24a_cube_conquer.py \
+            --solve \
+            --source source \
+            --manifest source/v24a-manifest.json \
+            --task-id "${{ needs.plan.outputs.first_task }}" \
+            --seconds-override 10 \
+            --result "cadical/results/result.json" \
+            --log "cadical/logs/run.log"
+      - name: Exercise Kissat on the same signed child
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          p = json.loads(Path("source/v24a-manifest.json").read_text())
+          t = dict(p["cadical_tasks"][0])
+          t.update(
+              task_id="kissat-smoke-a0001",
+              stage="kissat-smoke",
+              method="kissat10",
+              solver="kissat",
+              seconds=10,
+          )
+          q = {
+              "schema": p["schema"],
+              "model_version": p["model_version"],
+              "cadical_tasks": [],
+              "kissat_tasks": [t],
+          }
+          Path("source/v24a-smoke-kissat.json").write_text(
+              json.dumps(q, indent=2) + "\n"
+          )
+          PY
+          mkdir -p kissat/results kissat/logs
+          python scripts/k16_v24a_cube_conquer.py \
+            --solve \
+            --source source \
+            --manifest source/v24a-smoke-kissat.json \
+            --task-id "kissat-smoke-a0001" \
+            --seconds-override 10 \
+            --result "kissat/results/result.json" \
+            --log "kissat/logs/run.log"
+      - name: Publish smoke verdict
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          a = json.loads(Path("cadical/results/result.json").read_text())
+          k = json.loads(Path("kissat/results/result.json").read_text())
+          print("## V24-A smoke passed")
+          print(f"\n- CaDiCaL: `{a['status']}`")
+          print(f"- Kissat: `{k['status']}`")
+          print("- source ledger and all 19 coverage trees audited")
+          print("\nUNKNOWN is acceptable in this ten-second environment gate.")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24a-smoke-results
+          path: |
+            cadical/
+            kissat/
+          if-no-files-found: error
+          retention-days: 30
+
+  cadical:
+    name: ${{ matrix.task_id }}
+    needs: plan
+    if: >-
+      (inputs.mode == 'formal' || github.event_name == 'pull_request') &&
+      needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v24a-source
+          path: source
+      - name: Run one exact CaDiCaL child for up to 60 minutes
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x source/cadical/cadical
+          mkdir -p results logs
+          python scripts/k16_v24a_cube_conquer.py \
+            --solve \
+            --source source \
+            --manifest source/v24a-manifest.json \
+            --task-id "${{ matrix.task_id }}" \
+            --result "results/${{ matrix.task_id }}.json" \
+            --log "logs/${{ matrix.task_id }}.log" \
+            2>&1 | tee "logs/${{ matrix.task_id }}-wrapper.log"
+      - name: Publish logical status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          paths = list(Path("results").glob("*.json"))
+          if not paths:
+              print("## Infrastructure error\n\nNo signed result.")
+          else:
+              r = json.loads(paths[0].read_text())
+              print(f"## {r['task_id']}: {r['status']}")
+              print(f"\n- V22 source leaf: `{r['source_leaf_id']}`")
+              print(f"- split path: `{r['split_path']}`")
+              print(
+                  f"- seconds: `{r['seconds']}` / "
+                  f"`{r['time_limit_seconds']}`"
+              )
+              print(f"- exact UNSAT closure: `{r['solver_level_exact']}`")
+              if r["status"] == "UNKNOWN":
+                  print("- advances to the independent Kissat lane")
+          PY
+      - id: upload-cadical
+        uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: v24a-cadical-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Retry artifact upload after a transient failure
+        uses: actions/upload-artifact@v4
+        if: always() && steps.upload-cadical.outcome == 'failure'
+        with:
+          name: v24a-cadical-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
+  select-kissat:
+    name: Send only CaDiCaL UNKNOWN children to Kissat
+    needs:
+      - plan
+      - cadical
+    if: >-
+      always() &&
+      (inputs.mode == 'formal' || github.event_name == 'pull_request') &&
+      needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v24a-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v24a-cadical-*
+          path: cadical-results
+      - id: matrix
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/k16_v24a_cube_conquer.py \
+            --select-kissat \
+            --source source \
+            --cadical-results-root cadical-results \
+            --output v24a-stage \
+            --matrix-output v24a-kissat-matrix.json \
+            | tee v24a-select-kissat.log
+          matrix="$(tr -d '\n' < v24a-kissat-matrix.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v24a-kissat-matrix.json"))["include"]))')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24a-cadical-stage
+          path: v24a-stage/
+          if-no-files-found: error
+          retention-days: 90
+
+  kissat:
+    name: ${{ matrix.task_id }}
+    needs: select-kissat
+    if: needs.select-kissat.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.select-kissat.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v24a-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          name: v24a-cadical-stage
+          path: stage
+      - name: Run one independent Kissat child for up to 60 minutes
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x source/kissat/kissat
+          mkdir -p results logs
+          python scripts/k16_v24a_cube_conquer.py \
+            --solve \
+            --source source \
+            --manifest stage/v24a-kissat-manifest.json \
+            --task-id "${{ matrix.task_id }}" \
+            --result "results/${{ matrix.task_id }}.json" \
+            --log "logs/${{ matrix.task_id }}.log" \
+            2>&1 | tee "logs/${{ matrix.task_id }}-wrapper.log"
+      - id: upload-kissat
+        uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: v24a-kissat-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Retry artifact upload after a transient failure
+        uses: actions/upload-artifact@v4
+        if: always() && steps.upload-kissat.outcome == 'failure'
+        with:
+          name: v24a-kissat-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
+  aggregate:
+    name: Publish the resumable V24-A ledger
+    needs:
+      - plan
+      - select-kissat
+      - kissat
+    if: >-
+      always() &&
+      (inputs.mode == 'formal' || github.event_name == 'pull_request') &&
+      needs.plan.result == 'success' &&
+      needs.select-kissat.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v24a-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          name: v24a-cadical-stage
+          path: stage
+      - name: Download Kissat results
+        if: needs.select-kissat.outputs.count != '0'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v24a-kissat-*
+          path: kissat-results
+      - name: Merge only exact closures
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p kissat-results aggregate
+          python scripts/k16_v24a_cube_conquer.py \
+            --aggregate \
+            --source source \
+            --cadical-ledger stage/v24a-cadical-ledger.json \
+            --kissat-results-root kissat-results \
+            --workflow-run-id "${{ github.run_id }}" \
+            --output aggregate/v24a-ledger.json \
+            | tee aggregate/v24a-ledger.log
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(Path("aggregate/v24a-ledger.json").read_text())
+          print("## V24-A cube-and-conquer verdict")
+          print(f"\n- conclusion: `{r['logical_conclusion']}`")
+          print(
+              f"- newly closed V22 source leaves: "
+              f"`{r['newly_closed_source_leaf_count']}` / 19"
+          )
+          print(f"- remaining exact children: `{r['open_child_count']}`")
+          print(
+              f"- original parent regions closed: "
+              f"`{r['closed_parent_count']}` / 139"
+          )
+          print(f"- verified SAT: `{len(r['verified_sat_witnesses'])}`")
+          print("\nUNKNOWN remains open; this ledger is the next checkpoint.")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24a-ledger
+          path: aggregate/
+          if-no-files-found: error
+          retention-days: 90

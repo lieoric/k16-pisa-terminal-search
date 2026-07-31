@@ -1,0 +1,318 @@
+name: K16 Pisa v5 exact elite repair and global endpoint partition
+
+on:
+  workflow_dispatch:
+    inputs:
+      elite_radius:
+        description: Exact Hamming radius around each of the 64 v7 elites
+        required: true
+        default: "4"
+      elite_seconds:
+        description: Solver seconds for each exact elite ball
+        required: true
+        default: "300"
+      endpoint_seconds:
+        description: Solver seconds for each disjoint global endpoint box
+        required: true
+        default: "900"
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: k16-pisa-v5-endgame
+  cancel-in-progress: false
+
+jobs:
+  gates:
+    name: Positive regression and twin-cut gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run all positive regression gates
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p results logs
+          python k16_pisa_solver.py --gates-only --output-dir results \
+            2>&1 | tee logs/gates.log
+      - name: Upload gate evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v5-gates
+          path: |
+            results/
+            logs/
+          if-no-files-found: error
+          retention-days: 90
+
+  prepare_elites:
+    name: Recover and validate all 64 v7 elites
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download the completed v7 shard evidence
+        shell: bash
+        run: |
+          mkdir -p previous
+          gh run download 30190571931 \
+            --repo "${{ github.repository }}" \
+            --pattern "witness-cpu-shard-*" \
+            --dir previous
+      - name: Build the exact elite matrix
+        id: matrix
+        shell: bash
+        run: |
+          mkdir -p prepared
+          python scripts/prepare_elite_matrix.py previous \
+            --output prepared/elites.json \
+            --matrix-output prepared/matrix.json
+          echo "matrix=$(cat prepared/matrix.json)" >> "$GITHUB_OUTPUT"
+      - name: Upload canonical elite input
+        uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v5-elites
+          path: prepared/
+          if-no-files-found: error
+          retention-days: 90
+
+  elite_balls:
+    name: Exact elite ball ${{ matrix.shard }}
+    needs:
+      - gates
+      - prepare_elites
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.prepare_elites.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/download-artifact@v7
+        with:
+          name: endgame-v5-elites
+          path: prepared
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Solve the full exact Hamming ball
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "results/shard-${{ matrix.shard }}"
+          python scripts/elite_hamming_ball.py \
+            --elites prepared/elites.json \
+            --shard "${{ matrix.shard }}" \
+            --radius "${{ inputs.elite_radius || '4' }}" \
+            --seconds "${{ inputs.elite_seconds || '300' }}" \
+            --workers 4 \
+            --seed "$((20260726 + ${{ matrix.shard }}))" \
+            --output "results/shard-${{ matrix.shard }}/result.json" \
+            2>&1 | tee "results/shard-${{ matrix.shard }}/run.log"
+      - name: Record logical result
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          r = json.loads(Path(
+              "results/shard-${{ matrix.shard }}/result.json"
+          ).read_text())
+          print(f"## Elite {r['source_shard']}: {r['status']}")
+          print(f"- Exact Hamming radius: {r['radius']}")
+          print(f"- Zero type: `{tuple(r['zero_type'])}`")
+          print(f"- Required total-blocker floor: {r['total_b_floor']}")
+          print(f"- Center already-known issues: {r['center_known_closed_reasons']}")
+          if r["status"] == "SAT":
+              print("- **Independent verifier accepted a K16 Pisa witness.**")
+          elif r["status"] == "UNSAT":
+              print("- The complete named Hamming ball is exactly closed.")
+          else:
+              print("- UNKNOWN leaves this Hamming ball open.")
+          PY
+      - name: Upload JSON and complete log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v5-elite-ball-${{ matrix.shard }}
+          path: results/shard-${{ matrix.shard }}/
+          if-no-files-found: warn
+          retention-days: 90
+
+  elite_summary:
+    name: Aggregate exact elite repairs
+    if: always()
+    needs: elite_balls
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      witnesses: ${{ steps.status.outputs.witnesses }}
+      complete: ${{ steps.status.outputs.complete }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: endgame-v5-elite-ball-*
+          path: downloaded
+      - name: Build logical summary
+        shell: bash
+        run: |
+          mkdir -p summary
+          python scripts/aggregate_endgame.py downloaded \
+            --label "v5 exact elite Hamming balls" \
+            --expected 64 \
+            --output summary/elite-summary.json \
+            | tee summary/elite-summary.md
+          cat summary/elite-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish witness count
+        id: status
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+          r = json.loads(Path("summary/elite-summary.json").read_text())
+          print(f"witnesses={len(r['witnesses'])}")
+          print(f"complete={str(r['complete']).lower()}")
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v5-elite-summary
+          path: summary/
+          if-no-files-found: error
+          retention-days: 90
+
+  endpoint_plan:
+    name: Build the complete remaining endpoint matrix
+    needs:
+      - gates
+      - elite_summary
+    if: >-
+      needs.gates.result == 'success' &&
+      needs.elite_summary.outputs.complete == 'true' &&
+      needs.elite_summary.outputs.witnesses == '0'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Generate 111 disjoint endpoint boxes
+        id: matrix
+        shell: bash
+        run: |
+          matrix="$(python scripts/endpoint_partition.py --matrix)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          python scripts/endpoint_partition.py --list-boxes | wc -l
+
+  endpoint_boxes:
+    name: Global endpoint ${{ matrix.box }}
+    needs:
+      - gates
+      - elite_summary
+      - endpoint_plan
+    if: >-
+      needs.gates.result == 'success' &&
+      needs.elite_summary.outputs.complete == 'true' &&
+      needs.elite_summary.outputs.witnesses == '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.endpoint_plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Solve one disjoint global endpoint box
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "results/${{ matrix.box }}"
+          python scripts/endpoint_partition.py \
+            --box "${{ matrix.box }}" \
+            --seconds "${{ inputs.endpoint_seconds || '900' }}" \
+            --workers 4 \
+            --seed 20260726 \
+            --output "results/${{ matrix.box }}/result.json" \
+            2>&1 | tee "results/${{ matrix.box }}/run.log"
+      - name: Record logical result
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          r = json.loads(Path(
+              "results/${{ matrix.box }}/result.json"
+          ).read_text())
+          print(f"## {r['box']}: {r['status']}")
+          print(f"- Zero type: `{tuple(r['zero_type'])}`")
+          print(f"- Total blockers: `{r['total_blockers']}`")
+          print(f"- Minimum blocker degree: {r['minimum_blocker_degree']}")
+          if r["status"] == "SAT":
+              print("- **Independent verifier accepted a K16 Pisa witness.**")
+          elif r["status"] == "UNSAT":
+              print("- This disjoint global endpoint box is exactly closed.")
+          else:
+              print("- UNKNOWN leaves this global endpoint box open.")
+          PY
+      - name: Upload JSON and complete log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v5-endpoint-${{ matrix.box }}
+          path: results/${{ matrix.box }}/
+          if-no-files-found: warn
+          retention-days: 90
+
+  endpoint_summary:
+    name: Aggregate complete global endpoint map
+    if: ${{ always() && needs.endpoint_boxes.result != 'skipped' }}
+    needs: endpoint_boxes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: endgame-v5-endpoint-*
+          path: downloaded
+      - name: Build final logical summary
+        shell: bash
+        run: |
+          mkdir -p summary
+          python scripts/aggregate_endgame.py downloaded \
+            --label "v5 complete global endpoint partition" \
+            --expected 111 \
+            --output summary/endpoint-summary.json \
+            | tee summary/endpoint-summary.md
+          cat summary/endpoint-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v5-endpoint-summary
+          path: summary/
+          if-no-files-found: error
+          retention-days: 90

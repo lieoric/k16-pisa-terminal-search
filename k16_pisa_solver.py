@@ -213,8 +213,18 @@ def canonicalize_zero_branch(out, zero_vertex=None):
         if v != zero_vertex and not arc(out, zero_vertex, v) and v not in blocker_set
     ]
 
+    covered_counts = [0] * len(out)
+    for blocked_vertex in range(len(out)):
+        for covering_vertex in check["blocker_sets"][blocked_vertex]:
+            covered_counts[covering_vertex] += 1
+
     def role_key(v):
-        return (check["outdegrees"][v], v)
+        return (
+            check["outdegrees"][v],
+            check["blockers"][v],
+            covered_counts[v],
+            v,
+        )
 
     out_neighbors.sort(key=role_key)
     blockers.sort(key=role_key)
@@ -324,6 +334,10 @@ class TerminalTournamentModel:
         total_b_eq=None,
         total_b_min=None,
         excluded_profiles=None,
+        strongness_mode="score",
+        anchor_refinement=None,
+        invariant_role_sort=False,
+        role_symmetry_break=True,
     ):
         self.n = n
         self.model = cp_model.CpModel()
@@ -395,6 +409,15 @@ class TerminalTournamentModel:
             self.bcount.append(b)
         m.AddBoolOr(zero_flags)
 
+        self.covered_count = []
+        for x in range(n):
+            covered = m.NewIntVar(0, n - 1, f"covered_count_{x}")
+            m.Add(
+                covered
+                == sum(self.blocker[(v, x)] for v in range(n) if v != x)
+            )
+            self.covered_count.append(covered)
+
         # Exact cover cuts.
         for (v, x), q in self.blocker.items():
             m.Add(self.degree[x] >= self.degree[v] + 1).OnlyEnforceIf(q)
@@ -424,6 +447,9 @@ class TerminalTournamentModel:
             out_group = list(range(1, d0 + 1))
             blocker_group = list(range(d0 + 1, d0 + b0 + 1))
             other_in_group = list(range(d0 + b0 + 1, n))
+            self.out_group = out_group
+            self.zero_blocker_group = blocker_group
+            self.other_in_group = other_in_group
 
             m.Add(self.degree[0] == d0)
             m.Add(self.bcount[0] == b0)
@@ -441,27 +467,145 @@ class TerminalTournamentModel:
                 # Explicit witness that x is not a blocker of 0.
                 m.Add(sum(A(u, x) for u in out_group) >= 1)
 
-            # Degree sorting within role classes is a safe label symmetry break.
-            for group in (out_group, blocker_group, other_in_group):
-                for i in range(len(group) - 1):
-                    m.Add(self.degree[group[i]] <= self.degree[group[i + 1]])
+            # If a blocker x of the selected zero point has the minimum
+            # possible degree d(0)+1, then
+            #
+            #     N+(x) = N+(0) union {0}.
+            #
+            # Hence x and 0 have identical orientation to every third
+            # vertex.  Encoding this "ordered twin" consequence explicitly
+            # is much stronger than waiting for the degree and cover
+            # constraints to rediscover it late in search.  Two distinct
+            # blockers cannot both be such twins, so at most one gap-one
+            # blocker exists.
+            gap_one_blockers = []
+            for x in blocker_group:
+                gap_one = m.NewBoolVar(f"zero_blocker_{x}_degree_gap_one")
+                m.Add(self.degree[x] == d0 + 1).OnlyEnforceIf(gap_one)
+                m.Add(self.degree[x] >= d0 + 2).OnlyEnforceIf(gap_one.Not())
+                for u in range(1, n):
+                    if u != x:
+                        m.Add(A(x, u) == A(0, u)).OnlyEnforceIf(gap_one)
+                gap_one_blockers.append(gap_one)
+            if gap_one_blockers:
+                m.Add(sum(gap_one_blockers) <= 1)
 
-        # Strongness from a sorted score sequence. p is a permutation of labels,
-        # score[k] = degree[p[k]], and every proper Landau prefix is strict.
-        self.score_perm = [m.NewIntVar(0, n - 1, f"score_perm_{k}") for k in range(n)]
-        self.score = [m.NewIntVar(0, n - 1, f"score_{k}") for k in range(n)]
-        m.AddAllDifferent(self.score_perm)
-        for k in range(n):
-            m.AddElement(self.score_perm[k], self.degree, self.score[k])
-        for k in range(n - 1):
-            m.Add(self.score[k] <= self.score[k + 1])
-            equal = m.NewBoolVar(f"score_equal_{k}")
-            m.Add(self.score[k] == self.score[k + 1]).OnlyEnforceIf(equal)
-            m.Add(self.score[k] != self.score[k + 1]).OnlyEnforceIf(equal.Not())
-            m.Add(self.score_perm[k] < self.score_perm[k + 1]).OnlyEnforceIf(equal)
-        for k in range(1, n):
-            m.Add(sum(self.score[:k]) >= comb(k, 2) + 1)
-        m.Add(sum(self.score) == comb(n, 2))
+            symmetry_groups = [out_group, blocker_group, other_in_group]
+            if anchor_refinement is not None:
+                anchor = blocker_group[0]
+                anchor_degree = int(anchor_refinement["degree"])
+                pattern = tuple(anchor_refinement.get("other_blocker_pattern", ()))
+                if len(pattern) != max(0, b0 - 1):
+                    raise ValueError("bad anchor-versus-blockers pattern")
+                if any(bit not in (0, 1) for bit in pattern):
+                    raise ValueError("anchor pattern must be binary")
+
+                m.Add(self.degree[anchor] == anchor_degree)
+                for x in blocker_group[1:]:
+                    m.Add(self.degree[anchor] <= self.degree[x])
+                for bit, x in zip(pattern, blocker_group[1:]):
+                    m.Add(A(anchor, x) == bit)
+
+                base_wins = d0 + 1 + sum(pattern)
+                wins_in_other = anchor_degree - base_wins
+                if not 0 <= wins_in_other <= len(other_in_group):
+                    raise ValueError("anchor degree and pattern are incompatible")
+                anchor_wins = other_in_group[:wins_in_other]
+                anchor_losses = other_in_group[wins_in_other:]
+                for x in anchor_wins:
+                    m.Add(A(anchor, x) == 1)
+                for x in anchor_losses:
+                    m.Add(A(x, anchor) == 1)
+
+                blocker_subgroups = []
+                for relation in (0, 1):
+                    subgroup = [
+                        x for bit, x in zip(pattern, blocker_group[1:])
+                        if bit == relation
+                    ]
+                    if subgroup:
+                        blocker_subgroups.append(subgroup)
+                symmetry_groups = [
+                    out_group,
+                    *blocker_subgroups,
+                    anchor_wins,
+                    anchor_losses,
+                ]
+
+            if role_symmetry_break:
+                for group in symmetry_groups:
+                    if invariant_role_sort:
+                        self._add_invariant_role_sort(group)
+                    else:
+                        for i in range(len(group) - 1):
+                            m.Add(
+                                self.degree[group[i]]
+                                <= self.degree[group[i + 1]]
+                            )
+
+        if strongness_mode == "score":
+            # Strongness from a sorted score sequence. p is a permutation of
+            # labels, score[k] = degree[p[k]], and every proper Landau prefix
+            # is strict.
+            self.score_perm = [
+                m.NewIntVar(0, n - 1, f"score_perm_{k}") for k in range(n)
+            ]
+            self.score = [
+                m.NewIntVar(0, n - 1, f"score_{k}") for k in range(n)
+            ]
+            m.AddAllDifferent(self.score_perm)
+            for k in range(n):
+                m.AddElement(self.score_perm[k], self.degree, self.score[k])
+            for k in range(n - 1):
+                m.Add(self.score[k] <= self.score[k + 1])
+                equal = m.NewBoolVar(f"score_equal_{k}")
+                m.Add(self.score[k] == self.score[k + 1]).OnlyEnforceIf(equal)
+                m.Add(self.score[k] != self.score[k + 1]).OnlyEnforceIf(
+                    equal.Not()
+                )
+                m.Add(
+                    self.score_perm[k] < self.score_perm[k + 1]
+                ).OnlyEnforceIf(equal)
+            for k in range(1, n):
+                m.Add(sum(self.score[:k]) >= comb(k, 2) + 1)
+            m.Add(sum(self.score) == comb(n, 2))
+        elif strongness_mode == "rooted_role_cuts":
+            if zero_partition is None:
+                raise ValueError("rooted role cuts require zero_partition")
+            # Every non-blocker in-neighbour of 0 is reached in two steps
+            # from 0, and every in-neighbour reaches 0 directly.  Therefore
+            # only the chosen blockers can fail to be reached from 0, while
+            # only the chosen out-neighbours can fail to reach 0.
+            #
+            # Enumerating nonempty subsets of those two small role classes
+            # gives an exact rooted strong-connectivity encoding: no subset
+            # of blockers may be closed to incoming arcs, and no subset of
+            # out-neighbours may be closed to outgoing arcs.
+            all_vertices = list(range(n))
+            for mask in range(1, 1 << len(blocker_group)):
+                subset = [
+                    blocker_group[i]
+                    for i in range(len(blocker_group))
+                    if (mask >> i) & 1
+                ]
+                outside = [v for v in all_vertices if v not in subset]
+                m.AddBoolOr([A(y, x) for x in subset for y in outside])
+            for mask in range(1, 1 << len(out_group)):
+                subset = [
+                    out_group[i]
+                    for i in range(len(out_group))
+                    if (mask >> i) & 1
+                ]
+                outside = [v for v in all_vertices if v not in subset]
+                m.AddBoolOr([A(x, y) for x in subset for y in outside])
+        elif strongness_mode == "external":
+            # A specialized caller may provide its own exact strong-connectivity
+            # encoding.  For example, a fixed local median order is a directed
+            # Hamiltonian path, so one reverse arc across each proper prefix is
+            # necessary and sufficient for strongness.
+            pass
+        else:
+            raise ValueError(f"unknown strongness mode: {strongness_mode}")
 
         self.total_b = m.NewIntVar(0, n * (n - 1), "total_b")
         m.Add(self.total_b == sum(self.bcount))
@@ -472,6 +616,41 @@ class TerminalTournamentModel:
 
         # Reuse theorem/frontier closures as exact profile nogoods.
         self._add_profile_exclusions(excluded_profiles or [])
+
+    def _add_invariant_role_sort(self, group):
+        """Safe lexicographic ordering of interchangeable role vertices."""
+        m = self.model
+        for left, right in zip(group, group[1:]):
+            m.Add(self.degree[left] <= self.degree[right])
+            degree_equal = m.NewBoolVar(
+                f"role_degree_equal_{left}_{right}"
+            )
+            m.Add(
+                self.degree[left] == self.degree[right]
+            ).OnlyEnforceIf(degree_equal)
+            m.Add(
+                self.degree[left] != self.degree[right]
+            ).OnlyEnforceIf(degree_equal.Not())
+            m.Add(
+                self.bcount[left] <= self.bcount[right]
+            ).OnlyEnforceIf(degree_equal)
+
+            blocker_equal = m.NewBoolVar(
+                f"role_blocker_equal_{left}_{right}"
+            )
+            m.Add(
+                self.bcount[left] == self.bcount[right]
+            ).OnlyEnforceIf(blocker_equal)
+            m.Add(
+                self.bcount[left] != self.bcount[right]
+            ).OnlyEnforceIf(blocker_equal.Not())
+            both_equal = m.NewBoolVar(
+                f"role_degree_blocker_equal_{left}_{right}"
+            )
+            exact_and(m, both_equal, [degree_equal, blocker_equal])
+            m.Add(
+                self.covered_count[left] <= self.covered_count[right]
+            ).OnlyEnforceIf(both_equal)
 
     def _add_profile_exclusions(self, profiles):
         if not profiles:

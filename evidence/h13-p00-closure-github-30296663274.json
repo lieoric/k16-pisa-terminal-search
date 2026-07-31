@@ -1,0 +1,109 @@
+{
+  "schema": "k16-pisa-h13-p00-closure-evidence-v1",
+  "status": "UNSAT_H13_P00",
+  "created_utc": "2026-07-27T19:34:41Z",
+  "logical_target": {
+    "box": "h13_p00",
+    "quotient_order": 13,
+    "weight_multiset": [
+      4,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "meaning": "All strong 13-vertex quotient tournaments with one fibre of size 4 and twelve singleton fibres."
+  },
+  "runs": {
+    "initial_cube_run": {
+      "url": "https://github.com/lieoric/k16-pisa-terminal-search/actions/runs/30250854456",
+      "git_commit": "2c965e8",
+      "stage1_weight_placements": 13,
+      "stage1_exact_unsat": 1,
+      "stage1_unknown_refined": 12,
+      "stage2_second_zero_slices": 144,
+      "stage2_exact_unsat": 143,
+      "stage2_unknown": 1,
+      "last_open_slice": "h13_p00_a000_z02",
+      "last_open_slice_statistics": {
+        "wall_seconds": 1800.256,
+        "branches": 17375948,
+        "conflicts": 12495243
+      }
+    },
+    "final_semantic_refinement": {
+      "url": "https://github.com/lieoric/k16-pisa-terminal-search/actions/runs/30296663274",
+      "git_commit": "9631e5d",
+      "scope": "Exactly h13_p00_a000_z02, the sole open slice from the initial cube run.",
+      "degree_partition": {
+        "cubes": 6,
+        "exact_unsat": 5,
+        "refined": 1
+      },
+      "second_zero_invariant_partition": {
+        "children": 10,
+        "exact_unsat": 8,
+        "refined": 2
+      },
+      "unique_blocker_outgoing_weight_partition": {
+        "children": 14,
+        "exact_unsat": 14
+      },
+      "aggregate": {
+        "records_returned": 30,
+        "degree_cubes_closed": 6,
+        "degree_cubes_total": 6,
+        "open_refined_slices": 0,
+        "missing_slices": 0,
+        "duplicate_slices": 0,
+        "sat_slices": 0,
+        "error_slices": 0,
+        "status": "UNSAT_H13_LAST_SLICE"
+      },
+      "last_hard_child": {
+        "slice_id": "h13_p00_a000_z02_d06_a021_w27_bk11",
+        "status": "UNSAT",
+        "solver_status": "INFEASIBLE",
+        "solver_level_exact": true,
+        "wall_seconds": 841.884,
+        "branches": 1921859,
+        "conflicts": 851086,
+        "zero0_outdegree": 6,
+        "zero0_blocker_count": 0,
+        "arc_0_2": 1,
+        "zero2_outgoing_weight": 7,
+        "zero2_blocker_weight": 1,
+        "unique_blocker2_outgoing_weight": 11
+      }
+    }
+  },
+  "logical_conclusion": {
+    "proved_by_computation": "The complete h13_p00 weight pattern (4,1^12) is infeasible.",
+    "module_consequence": "A K16 Pisa tournament has no module of size 4.",
+    "combined_consequence": "Together with the exact h<=10 audit/formal closures and h11_p00/h12_p00 closures, every module of size at least 4 is excluded. Any remaining decomposable K16 witness can use only modules of sizes 2 and 3.",
+    "next_diagonal_boxes": [
+      "h14_p00=(3,1^13)",
+      "h15_p00=(2,1^14)"
+    ],
+    "not_claimed": [
+      "Nonexistence of a K16 Pisa tournament.",
+      "Infeasibility of every h=13 weight multiset.",
+      "Infeasibility of quotient patterns using only fibre sizes 2 and 3.",
+      "Infeasibility of a primitive K16 Pisa tournament."
+    ]
+  },
+  "theorem_dependencies": [
+    "Camion: every strong tournament has a directed Hamilton cycle.",
+    "Havet--Thomasse Theorem 2: a tournament with no dominated vertex, defined in that paper as a vertex of outdegree zero, has two Seymour vertices; applied to the strong transitive-fibre expansion."
+  ],
+  "primary_reference": "https://www.math.ru.nl/OpenGraphProblems/TimV/%5BHavet%20and%20Thomass%C3%A9%5D%20Median%20Orders%20of%20Tournaments.pdf",
+  "accounting_note": "Parent UNKNOWN records and their exact child partitions overlap logically and must not be added as disjoint closed volumes. The aggregate proves closure because the final disjoint frontier has no open, missing, SAT, duplicate, or error slice."
+}

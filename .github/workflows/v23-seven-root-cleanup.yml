@@ -1,0 +1,381 @@
+name: K16 v23 seven-root exact cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      prior_atlas_run_id:
+        description: "Completed V22 seven-root atlas run"
+        required: true
+        default: "30392007070"
+        type: string
+      solver_run_id:
+        description: "Audited V21 run supplying SMS and CaDiCaL binaries"
+        required: true
+        default: "30353707059"
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/v23-seven-root-cleanup.yml"
+      - "scripts/k16_v23_atlas_cleanup.py"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: k16-v23-seven-root-cleanup
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PRIOR_ATLAS_RUN_ID: ${{ inputs.prior_atlas_run_id || '30392007070' }}
+  SOLVER_RUN_ID: ${{ inputs.solver_run_id || '30353707059' }}
+
+jobs:
+  plan:
+    name: Select exactly the 508 unsearched atlas leaves
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Download the completed V22 atlas ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v22-atlas-ledger
+          path: prior
+          run-id: ${{ env.PRIOR_ATLAS_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download all seven exact V22 partitions
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for box in \
+            a0_z2 a0_z3 a0_z4p a1_z2 a1_z4p a2p_z2 a2p_z3
+          do
+            gh run download "${{ env.PRIOR_ATLAS_RUN_ID }}" \
+              --name "v22-atlas-partition-${box}" \
+              --dir "partitions/v22-atlas-partition-${box}"
+          done
+      - id: matrix
+        name: Validate complements and build bounded CaDiCaL batches
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p plan-out
+          python scripts/k16_v23_atlas_cleanup.py \
+            --plan \
+            --prior-run-id "${{ env.PRIOR_ATLAS_RUN_ID }}" \
+            --prior-ledger prior/v22-atlas-ledger.json \
+            --partition a0_z2=partitions/v22-atlas-partition-a0_z2 \
+            --partition a0_z3=partitions/v22-atlas-partition-a0_z3 \
+            --partition a0_z4p=partitions/v22-atlas-partition-a0_z4p \
+            --partition a1_z2=partitions/v22-atlas-partition-a1_z2 \
+            --partition a1_z4p=partitions/v22-atlas-partition-a1_z4p \
+            --partition a2p_z2=partitions/v22-atlas-partition-a2p_z2 \
+            --partition a2p_z3=partitions/v22-atlas-partition-a2p_z3 \
+            --output plan-out \
+            --matrix-output v23-cadical-batches.json \
+            | tee v23-plan.log
+          matrix="$(tr -d '\n' < v23-cadical-batches.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v23-cadical-batches.json"))["include"]))')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+      - name: Publish the exact cleanup plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: v23-cleanup-plan
+          path: |
+            plan-out/
+            v23-cadical-batches.json
+            v23-plan.log
+          if-no-files-found: error
+          retention-days: 90
+
+  cadical:
+    name: ${{ matrix.batch_id }}
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Download the audited solver bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: v21-theorem-source
+          path: solver
+          run-id: ${{ env.SOLVER_RUN_ID }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: v23-cleanup-plan
+          path: plan
+      - name: Download this batch's exact partition
+        uses: actions/download-artifact@v4
+        with:
+          name: v22-atlas-partition-${{ matrix.box }}
+          path: prepared
+          run-id: ${{ env.PRIOR_ATLAS_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Run at most eight exact 30-minute CaDiCaL leaves
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x solver/cadical/cadical
+          python scripts/k16_v23_atlas_cleanup.py \
+            --solve-batch \
+            --solver-source solver \
+            --prepared prepared \
+            --manifest plan/plan-out/v23-cleanup-manifest.json \
+            --batch-id "${{ matrix.batch_id }}" \
+            --output batch-output \
+            2>&1 | tee v23-cadical-batch.log
+      - id: upload-cadical
+        name: Upload exact per-leaf CaDiCaL results
+        uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: v23-cleanup-cadical-${{ matrix.batch_id }}
+          path: |
+            batch-output/
+            v23-cadical-batch.log
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Retry CaDiCaL batch artifact upload
+        uses: actions/upload-artifact@v4
+        if: always() && steps.upload-cadical.outcome == 'failure'
+        with:
+          name: v23-cleanup-cadical-${{ matrix.batch_id }}
+          path: |
+            batch-output/
+            v23-cadical-batch.log
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
+  select-sms:
+    name: Send only cleanup UNKNOWN leaves to SMS
+    needs:
+      - plan
+      - cadical
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v23-cleanup-plan
+          path: plan
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v23-cleanup-cadical-*
+          path: cadical-results
+      - id: matrix
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p cadical-results stage
+          python scripts/k16_v23_atlas_cleanup.py \
+            --select-sms \
+            --manifest plan/plan-out/v23-cleanup-manifest.json \
+            --cadical-results-root cadical-results \
+            --output stage \
+            --matrix-output v23-sms-batches.json \
+            | tee v23-select-sms.log
+          matrix="$(tr -d '\n' < v23-sms-batches.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v23-sms-batches.json"))["include"]))')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v23-cleanup-cadical-stage
+          path: |
+            stage/
+            v23-sms-batches.json
+            v23-select-sms.log
+          if-no-files-found: error
+          retention-days: 90
+
+  sms:
+    name: ${{ matrix.batch_id }}
+    needs: select-sms
+    if: needs.select-sms.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix: ${{ fromJSON(needs.select-sms.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Download the audited solver bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: v21-theorem-source
+          path: solver
+          run-id: ${{ env.SOLVER_RUN_ID }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: v23-cleanup-cadical-stage
+          path: stage
+      - name: Download this batch's exact partition
+        uses: actions/download-artifact@v4
+        with:
+          name: v22-atlas-partition-${{ matrix.box }}
+          path: prepared
+          run-id: ${{ env.PRIOR_ATLAS_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Run at most four exact 60-minute SMS leaves
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x solver/bundle/smsg
+          export LD_LIBRARY_PATH="$PWD/solver/bundle/lib:${LD_LIBRARY_PATH:-}"
+          python scripts/k16_v23_atlas_cleanup.py \
+            --solve-batch \
+            --solver-source solver \
+            --prepared prepared \
+            --manifest stage/stage/v23-cleanup-sms-manifest.json \
+            --batch-id "${{ matrix.batch_id }}" \
+            --output batch-output \
+            2>&1 | tee v23-sms-batch.log
+      - id: upload-sms
+        name: Upload exact per-leaf SMS results
+        uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: v23-cleanup-sms-${{ matrix.batch_id }}
+          path: |
+            batch-output/
+            v23-sms-batch.log
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Retry SMS batch artifact upload
+        uses: actions/upload-artifact@v4
+        if: always() && steps.upload-sms.outcome == 'failure'
+        with:
+          name: v23-cleanup-sms-${{ matrix.batch_id }}
+          path: |
+            batch-output/
+            v23-sms-batch.log
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
+  aggregate:
+    name: Publish the full seven-root cleanup ledger
+    needs:
+      - plan
+      - select-sms
+      - sms
+    if: >-
+      always() &&
+      needs.plan.result == 'success' &&
+      needs.select-sms.result == 'success' &&
+      (needs.sms.result == 'success' || needs.sms.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Download the completed V22 atlas ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v22-atlas-ledger
+          path: prior
+          run-id: ${{ env.PRIOR_ATLAS_RUN_ID }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: v23-cleanup-plan
+          path: plan
+      - uses: actions/download-artifact@v4
+        with:
+          name: v23-cleanup-cadical-stage
+          path: stage
+      - name: Download cleanup SMS results
+        if: needs.select-sms.outputs.count != '0'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v23-cleanup-sms-*
+          path: sms-results
+      - name: Merge all 676 exact partition leaves
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p sms-results aggregate
+          python scripts/k16_v23_atlas_cleanup.py \
+            --aggregate \
+            --plan-manifest plan/plan-out/v23-cleanup-manifest.json \
+            --prior-ledger prior/v22-atlas-ledger.json \
+            --cadical-ledger stage/stage/v23-cleanup-cadical-ledger.json \
+            --sms-results-root sms-results \
+            --workflow-run-id "${{ github.run_id }}" \
+            --output aggregate/v23-cleanup-ledger.json \
+            | tee aggregate/v23-cleanup-ledger.log
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(Path("aggregate/v23-cleanup-ledger.json").read_text())
+          print("## V23 seven-root exact cleanup")
+          print(f"\n- conclusion: `{r['logical_conclusion']}`")
+          print(f"- total partition leaves: `{r['total_partition_leaves']}`")
+          print(f"- exact UNSAT leaves: `{r['exact_leaf_closures']}`")
+          print(f"- UNKNOWN leaves: `{r['known_open_partition_leaves']}`")
+          print(f"- roots exactly excluded: `{len(r['root_unsat'])}`")
+          print(f"- verified SAT witnesses: `{len(r['verified_sat_witnesses'])}`")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v23-cleanup-ledger
+          path: aggregate/
+          if-no-files-found: error
+          retention-days: 90

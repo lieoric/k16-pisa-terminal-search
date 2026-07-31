@@ -1,0 +1,108 @@
+name: K16 Pisa v12 hybrid encoding smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - campaign/c16-circulant-completion
+    paths:
+      - ".github/workflows/v12-hybrid-smoke.yml"
+      - "pisa_verify.py"
+      - "requirements-sat.txt"
+      - "scripts/pisa_sat_v11.py"
+      - "scripts/solve_cube_v11.py"
+
+permissions:
+  contents: read
+
+jobs:
+  known-answer-gates:
+    name: K${{ matrix.n }} known-answer gate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - n: 8
+            expected: UNSAT
+          - n: 14
+            expected: SAT
+          - n: 15
+            expected: SAT
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install SAT dependencies
+        run: python -m pip install -r requirements-sat.txt
+      - name: Solve and independently verify
+        run: |
+          mkdir -p results
+          python scripts/pisa_sat_v11.py \
+            --n "${{ matrix.n }}" \
+            --min-total-blockers 0 \
+            --solve \
+            --solver cadical195 \
+            --result "results/gate-k${{ matrix.n }}.json"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          n = int("${{ matrix.n }}")
+          expected = "${{ matrix.expected }}"
+          record = json.loads(Path(f"results/gate-k{n}.json").read_text())
+          assert record["status"] == expected, record
+          if expected == "SAT":
+              assert record.get("verified") is True, record
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v12-gate-k${{ matrix.n }}
+          path: results/
+
+  hybrid-formula-gate:
+    name: Build symmetric v12 endpoint hybrid
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install SAT dependencies
+        run: python -m pip install -r requirements-sat.txt
+      - name: Build baseline and hybrid formulas
+        run: |
+          mkdir -p results
+          python scripts/pisa_sat_v11.py \
+            --n 16 \
+            --min-total-blockers 10 \
+            --cnf results/k16-v11-baseline.cnf \
+            --metadata results/k16-v11-baseline.json
+          python scripts/pisa_sat_v11.py \
+            --n 16 \
+            --min-total-blockers 16 \
+            --endpoint-closures \
+            --cnf results/k16-v12-hybrid.cnf \
+            --opb results/k16-v12-hybrid.opb \
+            --metadata results/k16-v12-hybrid.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          baseline = json.loads(Path("results/k16-v11-baseline.json").read_text())
+          hybrid = json.loads(Path("results/k16-v12-hybrid.json").read_text())
+          assert baseline["endpoint_closures"] is False
+          assert hybrid["endpoint_closures"] is True
+          assert hybrid["min_total_blockers"] == 16
+          assert hybrid["cnf"]["arc_variables"] == 240
+          assert hybrid["opb"]["arc_variables"] == 240
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v12-hybrid-formulas
+          path: results/

@@ -1,0 +1,133 @@
+name: K16 v24-G final publication certificate ledger
+
+on:
+  workflow_dispatch:
+    inputs:
+      wave1_run_id:
+        description: "Successful V24-F formal wave 1 run"
+        required: true
+        type: string
+      wave2_run_id:
+        description: "Successful V24-F formal wave 2 run"
+        required: true
+        type: string
+      wave3_run_id:
+        description: "Successful V24-F formal wave 3 run"
+        required: true
+        type: string
+      wave4_run_id:
+        description: "Successful V24-F formal wave 4 run"
+        required: true
+        type: string
+      wave5_run_id:
+        description: "Successful V24-F formal wave 5 run"
+        required: true
+        type: string
+      wave6_run_id:
+        description: "Successful V24-F formal wave 6 run"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  aggregate:
+    name: Require all six waves and all 1124 checked certificates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Download the frozen full-forest source
+        uses: actions/download-artifact@v4
+        with:
+          name: v24f-source-formal-w1
+          path: source-download
+          run-id: ${{ inputs.wave1_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download formal wave 1 ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24f-wave-ledger-formal-w1
+          path: wave-ledgers/w1
+          run-id: ${{ inputs.wave1_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download formal wave 2 ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24f-wave-ledger-formal-w2
+          path: wave-ledgers/w2
+          run-id: ${{ inputs.wave2_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download formal wave 3 ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24f-wave-ledger-formal-w3
+          path: wave-ledgers/w3
+          run-id: ${{ inputs.wave3_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download formal wave 4 ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24f-wave-ledger-formal-w4
+          path: wave-ledgers/w4
+          run-id: ${{ inputs.wave4_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download formal wave 5 ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24f-wave-ledger-formal-w5
+          path: wave-ledgers/w5
+          run-id: ${{ inputs.wave5_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download formal wave 6 ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24f-wave-ledger-formal-w6
+          path: wave-ledgers/w6
+          run-id: ${{ inputs.wave6_run_id }}
+          github-token: ${{ github.token }}
+      - name: Build the final independently checked ledger
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p final
+          python scripts/k16_v24f_full_certificates.py \
+            --aggregate-final \
+            --source source-download/v24f-source \
+            --wave-ledgers-root wave-ledgers \
+            --output final/v24f-complete-certificate-ledger.json \
+            | tee final/v24f-complete-certificate-ledger.log
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(
+              Path("final/v24f-complete-certificate-ledger.json").read_text()
+          )
+          print("## Complete publication certificate verdict")
+          print(f"\n- conclusion: `{r['logical_conclusion']}`")
+          print(
+              f"- terminal certificates: "
+              f"`{r['terminal_certificate_count']} / 1124`"
+          )
+          print(f"- DRAT verified: `{r['drat_verified']} / 1124`")
+          print(f"- LRAT verified: `{r['lrat_verified']} / 1124`")
+          print(f"- original coverage: `676 / 676`")
+          print(f"- forest SHA-256: `{r['forest_sha256']}`")
+          print(f"- wave runs: `{r['wave_run_ids']}`")
+          print(f"\n{r['claim_boundary']}")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24g-complete-publication-certificate-ledger
+          path: final/
+          if-no-files-found: error
+          retention-days: 90

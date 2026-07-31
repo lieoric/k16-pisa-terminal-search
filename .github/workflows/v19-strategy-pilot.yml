@@ -1,0 +1,268 @@
+name: K16 v19 hard-frontier strategy pilot
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/v19-strategy-pilot.yml"
+      - "scripts/k16_strategy_pilot.py"
+      - "scripts/k16_smart_deepen.py"
+      - "scripts/verify_primitive_witness.py"
+      - "docs/V19_STRATEGY_PILOT.md"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: k16-v19-hard-frontier-strategy-pilot
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  SOURCE_RUN_ID: "30332755449"
+  CADICAL_COMMIT: c60730422e758ef1cebe7aeddf2dda31c996bf04
+
+jobs:
+  build-cadical:
+    name: Build pinned CaDiCaL 3.0.1
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the official pinned release
+        shell: bash
+        run: |
+          set -o pipefail
+          git clone https://github.com/arminbiere/cadical.git tools/cadical
+          git -C tools/cadical checkout "$CADICAL_COMMIT"
+          (
+            cd tools/cadical
+            ./configure
+            make -j4
+          )
+          tools/cadical/build/cadical --version | tee cadical-version.log
+          test "$(tools/cadical/build/cadical --version)" = "3.0.1"
+          mkdir -p cadical-bundle
+          cp tools/cadical/build/cadical cadical-bundle/cadical
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v19-cadical-3.0.1
+          path: cadical-bundle/
+          if-no-files-found: error
+          retention-days: 90
+
+  plan:
+    name: Select 24 hard leaves and build the fair trial matrix
+    needs: build-cadical
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download the complete v18 source
+        uses: actions/download-artifact@v4
+        with:
+          name: v18-smart-deepen-source
+          path: prior/v18-source
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download the final v18 ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v18-smart-deepen-ledger
+          path: prior/v18-ledger
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download the pinned CaDiCaL binary
+        uses: actions/download-artifact@v4
+        with:
+          name: v19-cadical-3.0.1
+          path: prior/cadical
+      - id: matrix
+        name: Build the fixed strategy matrix and exact deep4 covers
+        shell: bash
+        run: |
+          set -o pipefail
+          ledger="$(find prior/v18-ledger -name \
+            'v18-smart-deepen-ledger.json' -type f -print -quit)"
+          test -n "$ledger"
+          python scripts/k16_strategy_pilot.py \
+            --plan \
+            --v18-source prior/v18-source \
+            --v18-ledger "$ledger" \
+            --cadical-source prior/cadical \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --output v19-source \
+            --matrix-output v19-matrix.json \
+            | tee v19-plan.log
+          matrix="$(tr -d '\n' < v19-matrix.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v19-matrix.json"))["include"]))')"
+          test "$count" -ge "48"
+          test "$count" -le "144"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(Path("v19-source/pilot-manifest.json").read_text())
+          print("## v19 hard-frontier pilot")
+          print(f"\n- v18 UNKNOWN frontier: `{r['selection']['frontier_unknown_leaves']}`")
+          print(f"- fixed leaves sampled: `{len(r['selection']['selected_leaves'])}`")
+          print(f"- exact solver jobs: `{len(r['tasks'])}`")
+          print("- `sms900`: 24 unsplit leaves × 900 seconds")
+          print(
+              "- `deep4_sms120`: 24 adaptive exact trees, at most four "
+              "consistent children × 120 seconds"
+          )
+          print("- `cadical900`: 24 static-enriched-CNF leaves × 900 seconds")
+          free = sum(
+              tree["planner_unit_unsat_children"]
+              for tree in r["split_trees"].values()
+          )
+          print(f"- unit-propagation terminals closed before solving: `{free}`")
+          print(
+              "\nThe deep4 children are complementary covers. "
+              "This pilot does not claim coverage of the other 115 leaves."
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v19-strategy-pilot-source
+          path: v19-source/
+          if-no-files-found: error
+          retention-days: 90
+
+  trial:
+    name: ${{ matrix.task_id }}
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: v19-strategy-pilot-source
+          path: source
+      - name: Run one signed strategy trial
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x source/bundle/smsg source/cadical/cadical
+          export LD_LIBRARY_PATH="$PWD/source/bundle/lib:${LD_LIBRARY_PATH:-}"
+          mkdir -p results logs
+          python scripts/k16_strategy_pilot.py \
+            --solve \
+            --source source \
+            --task-id "${{ matrix.task_id }}" \
+            --result "results/${{ matrix.task_id }}.json" \
+            --log "logs/${{ matrix.task_id }}.log" \
+            2>&1 | tee "logs/${{ matrix.task_id }}-wrapper.log"
+      - name: Publish trial semantics
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          paths = list(Path("results").glob("*.json"))
+          if not paths:
+              print("## Infrastructure error\n\nNo signed trial result.")
+          else:
+              r = json.loads(paths[0].read_text())
+              print(f"## {r['task_id']}: {r['status']}")
+              print(f"\n- method: `{r['method']}`")
+              print(f"- selected root: `{r['root_id']}`")
+              print(f"- seconds: `{r['seconds']}`")
+              print(f"- exact UNSAT closure: `{r['solver_level_exact']}`")
+              if r["status"] == "UNKNOWN":
+                  print("- UNKNOWN remains open")
+              if r["status"] == "SAT":
+                  print(f"- independent verification: `{r['verified']}`")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v19-result-${{ matrix.task_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+
+  aggregate:
+    name: Rank strategies by exact parent closures per CPU hour
+    needs:
+      - plan
+      - trial
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: v19-strategy-pilot-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v19-result-*
+          path: downloaded-results
+      - name: Compare complete parent closures, not green jobs
+        shell: bash
+        run: |
+          mkdir -p downloaded-results aggregate
+          python scripts/k16_strategy_pilot.py \
+            --aggregate \
+            --source source \
+            --results-root downloaded-results \
+            --output aggregate/v19-strategy-pilot-ledger.json \
+            | tee aggregate/v19-strategy-pilot-ledger.log
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(
+              Path("aggregate/v19-strategy-pilot-ledger.json").read_text()
+          )
+          print("## v19 strategy verdict")
+          print(f"\n- conclusion: `{r['logical_conclusion']}`")
+          print(f"- results received: `{r['results_received']}`")
+          print(f"- recommended method: `{r['recommended_method']}`")
+          print(
+              f"- parents closed by any method: "
+              f"`{r['parents_closed_by_any_method']}` / 24"
+          )
+          for method, summary in r["method_summary"].items():
+              print(
+                  f"- `{method}`: {summary['parents_closed']} parents; "
+                  f"{summary['cpu_hours']} CPU h; "
+                  f"{summary['closures_per_cpu_hour']} closures/CPU h; "
+                  f"statuses `{summary['statuses']}`"
+              )
+          print("\nUNKNOWN is not an exclusion.")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v19-strategy-pilot-ledger
+          path: aggregate/
+          retention-days: 90

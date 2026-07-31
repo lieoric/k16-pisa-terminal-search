@@ -1,0 +1,251 @@
+name: K16 v18 exact smart deepening
+
+on:
+  workflow_dispatch:
+    inputs:
+      cube_seconds:
+        description: Exact SMS budget for every queued leaf
+        required: true
+        default: "300"
+  pull_request:
+    paths:
+      - ".github/workflows/v18-smart-deepen.yml"
+      - "scripts/k16_smart_deepen.py"
+      - "scripts/verify_primitive_witness.py"
+      - "docs/V18_SMART_DEEPEN.md"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: k16-v18-exact-smart-deepen
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  SOURCE_RUN_ID: "30330960933"
+  CUBE_SECONDS: ${{ inputs.cube_seconds || '300' }}
+
+jobs:
+  plan:
+    name: Preserve 17 closures and build the exact continuation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.queue.outputs.matrix }}
+      count: ${{ steps.queue.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download the audited v17.1 SMS binary
+        uses: actions/download-artifact@v4
+        with:
+          name: v17-smart-sms-binary-and-gates
+          path: prior/binary
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download the complete a1_z3 lookahead partition
+        uses: actions/download-artifact@v4
+        with:
+          name: v17-smart-partition-a1_z3
+          path: prior/a1_z3
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download the complete a2p_z4p lookahead partition
+        uses: actions/download-artifact@v4
+        with:
+          name: v17-smart-partition-a2p_z4p
+          path: prior/a2p_z4p
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download the persistent v17.1 pilot ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v17-smart-cubing-pilot-ledger
+          path: prior/ledger
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - id: queue
+        name: Verify coverage and split only prior UNKNOWN leaves
+        shell: bash
+        run: |
+          set -o pipefail
+          ledger="$(find prior/ledger -name \
+            'v17-smart-cubing-pilot-ledger.json' -type f -print -quit)"
+          test -n "$ledger"
+          python scripts/k16_smart_deepen.py \
+            --plan \
+            --ledger "$ledger" \
+            --box-source "a1_z3=prior/a1_z3" \
+            --box-source "a2p_z4p=prior/a2p_z4p" \
+            --binary-source prior/binary \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --output v18-source \
+            --matrix-output v18-matrix.json \
+            | tee v18-plan.log
+          matrix="$(tr -d '\n' < v18-matrix.json)"
+          count="$(python -c \
+            'import json; print(len(json.load(open("v18-matrix.json"))["include"]))')"
+          test "$count" = "237"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(Path("v18-source/queue-manifest.json").read_text())
+          print("## v18 exact continuation")
+          print(f"\n- complete parent leaves: `{r['totals']['root_leaves']}`")
+          print(f"- retained exact UNSAT leaves: `{r['totals']['prior_exact_unsat']}`")
+          print(
+              "- prior UNKNOWN parents split into complementary pairs: "
+              f"`{r['totals']['prior_unknown_split_parents']}`"
+          )
+          print(f"- previously untested leaves queued: `{r['totals']['untested_originals']}`")
+          print(f"- exact jobs queued: `{r['totals']['queued_children_and_originals']}`")
+          print(
+              "\nEvery split is checked as `C+x` / `C-x`; no v17.1 "
+              "UNSAT leaf is rerun."
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v18-smart-deepen-source
+          path: v18-source/
+          if-no-files-found: error
+          retention-days: 90
+
+  conquer:
+    name: Conquer ${{ matrix.queue_id }}
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: v18-smart-deepen-source
+          path: source
+      - name: Solve exactly one disjoint queue leaf
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x source/bundle/smsg
+          export LD_LIBRARY_PATH="$PWD/source/bundle/lib:${LD_LIBRARY_PATH:-}"
+          mkdir -p results logs
+          python scripts/k16_smart_deepen.py \
+            --solve \
+            --source source \
+            --box "${{ matrix.box }}" \
+            --queue-line "${{ matrix.queue_line }}" \
+            --seconds "$CUBE_SECONDS" \
+            --result "results/${{ matrix.queue_id }}.json" \
+            --log "logs/${{ matrix.queue_id }}.log" \
+            2>&1 | tee "logs/${{ matrix.queue_id }}-wrapper.log"
+      - name: Publish exact leaf semantics
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          paths = [
+              path for path in Path("results").glob("*.json")
+              if path.name.endswith(".json")
+          ]
+          if not paths:
+              print("## Infrastructure error\n\nNo signed result was produced.")
+          else:
+              r = json.loads(paths[0].read_text())
+              print(f"## {r['queue_id']}: {r['status']}")
+              print(f"\n- kind: `{r['kind']}`")
+              print(f"- parent: `{r['parent_id']}`")
+              print(f"- decision depth: `{r['cube_depth']}`")
+              print(f"- seconds: `{r['seconds']}`")
+              print(f"- exact UNSAT closure: `{r['solver_level_exact']}`")
+              if r["status"] == "UNKNOWN":
+                  print("- this leaf remains open; it is not an exclusion")
+              if r["status"] == "SAT":
+                  print(f"- independent verification: `{r['verified']}`")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v18-result-${{ matrix.queue_id }}
+          path: |
+            results/
+            logs/
+          if-no-files-found: warn
+          retention-days: 90
+
+  aggregate:
+    name: Extend the permanent exact ledger
+    needs:
+      - plan
+      - conquer
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: v18-smart-deepen-source
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v18-result-*
+          path: downloaded-results
+      - name: Accumulate only exact UNSAT leaves
+        shell: bash
+        run: |
+          mkdir -p downloaded-results aggregate
+          python scripts/k16_smart_deepen.py \
+            --aggregate \
+            --source source \
+            --results-root downloaded-results \
+            --output aggregate/v18-smart-deepen-ledger.json \
+            | tee aggregate/v18-smart-deepen-ledger.log
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          r = json.loads(
+              Path("aggregate/v18-smart-deepen-ledger.json").read_text()
+          )
+          print("## v18 permanent ledger")
+          print(f"\n- conclusion: `{r['logical_conclusion']}`")
+          print(f"- received results: `{r['results_received']}`")
+          print(f"- status counts: `{r['result_statuses']}`")
+          print(f"- missing jobs: `{len(r['missing_queue_ids'])}`")
+          for box, summary in r["per_box"].items():
+              print(
+                  f"- `{box}`: {summary['total_closed_parent_leaves']}/"
+                  f"{summary['original_partition_leaves']} parent leaves closed; "
+                  f"root excluded `{summary['root_exactly_excluded']}`"
+              )
+          print(
+              "\nUNKNOWN is carried forward. Only exact UNSAT results "
+              "increase the closed ledger."
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v18-smart-deepen-ledger
+          path: aggregate/
+          retention-days: 90

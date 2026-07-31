@@ -1,0 +1,170 @@
+name: K16 Pisa v7.1 unknown-only local-median exact matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds_per_box:
+        description: Continuous solver budget for each disjoint LMO cube
+        required: true
+        default: "3600"
+  push:
+    branches:
+      - "agent/k16-endpoint-endgame"
+    paths:
+      - "campaigns/v7-median-formal-trigger.txt"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k16-pisa-v7-1-median-formal
+  cancel-in-progress: false
+
+jobs:
+  gates:
+    name: Median-order positive gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run exact positive gates
+        run: |
+          mkdir -p results
+          python scripts/median_order_v7.py \
+            --gates-only --gate-seconds 60 --workers 4 \
+            --output results/gates.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v7-1-median-formal-gates
+          path: results/
+          if-no-files-found: error
+          retention-days: 90
+
+  plan:
+    name: Generate 48 disjoint LMO cubes
+    needs: gates
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - id: matrix
+        shell: bash
+        run: |
+          matrix="$(python scripts/median_order_v7.py --matrix)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          python - <<'PY'
+          import json, subprocess
+          matrix = json.loads(subprocess.check_output(
+              ["python", "scripts/median_order_v7.py", "--matrix"],
+              text=True,
+          ))
+          assert len(matrix["include"]) == 48
+          PY
+
+  boxes:
+    name: Exact LMO ${{ matrix.box }} cube ${{ matrix.cube }}
+    needs:
+      - gates
+      - plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned solver
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Solve one disjoint local-median cube
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "results/${{ matrix.box }}/cube-${{ matrix.cube }}"
+          python scripts/median_order_v7.py \
+            --box "${{ matrix.box }}" \
+            --cube "${{ matrix.cube }}" \
+            --seconds "${{ inputs.seconds_per_box || '3600' }}" \
+            --workers 4 \
+            --seed "$((20260727 + ${{ matrix.cube }}))" \
+            --output "results/${{ matrix.box }}/cube-${{ matrix.cube }}/result.json" \
+            2>&1 | tee "results/${{ matrix.box }}/cube-${{ matrix.cube }}/run.log"
+      - name: Add logical status to job summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          p = Path("results/${{ matrix.box }}/cube-${{ matrix.cube }}/result.json")
+          if not p.exists():
+              print("## ERROR: result.json was not produced")
+          else:
+              r = json.loads(p.read_text())
+              print(f"## {r['box']} cube {r['cube']}: {r['status']}")
+              print(f"- Cube bits: `{r['cube_bits']}` on edges `{r['cube_edges']}`")
+              print(f"- Feed zero type: `{tuple(r['feed_zero_type'])}`")
+              print(f"- Total blockers: `{r['total_blockers']}`")
+              print(f"- Runtime: `{r['seconds']}` seconds")
+              print(f"- Conflicts / branches: `{r['conflicts']} / {r['branches']}`")
+              if r["status"] == "SAT":
+                  print("- **Independent verifier accepted a K16 witness.**")
+              elif r["status"] == "UNSAT":
+                  print("- This exact cube is permanently closed.")
+              else:
+                  print("- UNKNOWN: this parent layer remains open.")
+          PY
+      - name: Upload JSON and complete log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v7-1-median-${{ matrix.box }}-cube-${{ matrix.cube }}
+          path: results/${{ matrix.box }}/cube-${{ matrix.cube }}/
+          if-no-files-found: warn
+          retention-days: 90
+
+  summary:
+    name: Aggregate the 48-cube LMO map
+    if: ${{ always() && needs.boxes.result != 'skipped' }}
+    needs: boxes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: endgame-v7-1-median-lmo_*
+          path: downloaded
+      - name: Build logical summary
+        shell: bash
+        run: |
+          mkdir -p summary
+          python scripts/aggregate_endgame.py downloaded \
+            --label "v7.1 exact unknown-only local-median cubes" \
+            --expected 48 \
+            --output summary/endpoint-v7-median-summary.json \
+            | tee summary/endpoint-v7-median-summary.md
+          cat summary/endpoint-v7-median-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: endgame-v7-1-median-summary
+          path: summary/
+          if-no-files-found: error
+          retention-days: 90

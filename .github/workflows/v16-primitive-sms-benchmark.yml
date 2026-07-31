@@ -1,0 +1,299 @@
+name: K16 v16 primitive SMS 5h formal
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/v16-primitive-sms-benchmark.yml"
+      - "scripts/k16_primitive_sms.py"
+      - "scripts/verify_primitive_witness.py"
+      - "scripts/h14_module3_sms.py"
+      - "pisa_verify.py"
+      - "requirements-sat.txt"
+  workflow_dispatch:
+    inputs:
+      solve_seconds:
+        description: SMS search time for each exact full-S16 box
+        required: true
+        default: "18000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k16-v16-primitive-sms-formal
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  SMS_COMMIT: 464f12f1fd36b496e7ba9dcbb622b079de02dce4
+  SOLVE_SECONDS: ${{ inputs.solve_seconds || '18000' }}
+
+jobs:
+  gate-build-plan:
+    name: Exhaustive gates, pinned SMS, and full 9-box plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install exact-search dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements-sat.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential cmake libboost-graph-dev \
+            libboost-program-options-dev
+      - name: Run exhaustive encoding and independent-verifier gates
+        run: |
+          set -o pipefail
+          mkdir -p gates
+          python scripts/k16_primitive_sms.py \
+            --gates --output gates/model-gates.json \
+            2>&1 | tee gates/model-gates.log
+      - name: Build pinned SAT Modulo Symmetries
+        run: |
+          git clone --recursive \
+            https://github.com/markirch/sat-modulo-symmetries.git \
+            tools/sms
+          git -C tools/sms checkout "$SMS_COMMIT"
+          git -C tools/sms submodule update --init --recursive
+          (
+            cd tools/sms/cadical_sms
+            ./configure -fPIC
+            make -j4
+          )
+          cmake -S tools/sms -B tools/sms/build \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build tools/sms/build -j4
+          test -x tools/sms/build/src/smsg
+          mkdir -p bundle/lib
+          cp tools/sms/build/src/smsg bundle/smsg
+          ldd tools/sms/build/src/smsg | tee gates/smsg-ldd.txt
+          ldd tools/sms/build/src/smsg \
+            | awk '/libboost_/ {print $3}' \
+            | xargs -r -I '{}' cp '{}' bundle/lib/
+          test -n "$(find bundle/lib -maxdepth 1 -name 'libboost_*' -print -quit)"
+      - name: Verify directed mode and a 5+2 initial colour partition
+        run: |
+          set -o pipefail
+          python scripts/k16_primitive_sms.py \
+            --sms-gates \
+            --binary tools/sms/build/src/smsg \
+            --output gates/sms-gates.json \
+            2>&1 | tee gates/sms-gates.log
+      - id: plan
+        name: Emit all nine disjoint full-S16 boxes
+        shell: bash
+        run: |
+          echo "matrix=$(python scripts/k16_primitive_sms.py \
+            --matrix formal --lane full_s16)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v16-primitive-sms-binary-and-gates
+          path: |
+            bundle/
+            gates/
+          retention-days: 90
+
+  benchmark:
+    name: V16 5h ${{ matrix.slice_id }}
+    needs: gate-build-plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 9
+      matrix: ${{ fromJSON(needs.gate-build-plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements-sat.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v16-primitive-sms-binary-and-gates
+          path: prepared
+      - name: Solve one exact primitive box for up to five hours
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x prepared/bundle/smsg
+          export LD_LIBRARY_PATH="$PWD/prepared/bundle/lib:${LD_LIBRARY_PATH:-}"
+          mkdir -p cnf results logs
+          python scripts/k16_primitive_sms.py \
+            --solve \
+            --lane "${{ matrix.lane }}" \
+            --box "${{ matrix.box }}" \
+            --binary prepared/bundle/smsg \
+            --seconds "$SOLVE_SECONDS" \
+            --cnf "cnf/${{ matrix.slice_id }}.cnf" \
+            --result "results/${{ matrix.slice_id }}.json" \
+            --log "logs/${{ matrix.slice_id }}.log" \
+            2>&1 | tee "logs/${{ matrix.slice_id }}-wrapper.log"
+      - name: Publish exact logical status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          paths = [
+              path for path in Path("results").glob("*.json")
+              if not path.name.endswith(".meta.json")
+          ]
+          if not paths:
+              print("## ERROR\n\nNo result JSON was produced.")
+          else:
+              r = json.loads(paths[0].read_text())
+              print(f"## {r['slice_id']}: {r['status']}")
+              print(f"\n- lane: `{r['lane']}`")
+              print(f"- colour partition: `{r['sms_initial_partition']}`")
+              print(f"- solver seconds: `{r['seconds']}`")
+              print(f"- module clauses: `{r['cnf']['module_clauses']}`")
+              print(
+                  f"- module literal occurrences: "
+                  f"`{r['cnf']['module_literal_occurrences']}`"
+              )
+              print(f"- solver-level exact: `{r['solver_level_exact']}`")
+              if r["status"] == "SAT":
+                  print(
+                      f"- zero-shared-code Pisa/primitive audit: "
+                      f"`{r.get('verified')}`"
+                  )
+              elif r["status"] == "UNKNOWN":
+                  print("- no exclusion claimed; this exact box remains open")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-primitive-result-${{ matrix.slice_id }}
+          path: |
+            results/
+            logs/
+            cnf/*.meta.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Reject only missing, malformed, or unverified SAT output
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          paths = [
+              path for path in Path("results").glob("*.json")
+              if not path.name.endswith(".meta.json")
+          ]
+          if not paths:
+              raise SystemExit("ERROR: no result JSON")
+          r = json.loads(paths[0].read_text())
+          if r.get("status") not in {"SAT", "UNSAT", "UNKNOWN"}:
+              raise SystemExit(f"ERROR: bad status {r.get('status')!r}")
+          if r["status"] == "SAT" and not r.get("verified", False):
+              raise SystemExit("ERROR: SAT candidate failed independent audit")
+          print(f"Logical status recorded: {r['status']}")
+          PY
+
+  aggregate:
+    name: Aggregate all nine exact primitive boxes
+    needs: benchmark
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v16-primitive-result-*
+          path: downloaded
+          merge-multiple: false
+      - name: Build benchmark ledger
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from collections import Counter, defaultdict
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          records = []
+          for path in Path("downloaded").rglob("*.json"):
+              if path.name.endswith(".meta.json"):
+                  continue
+              record = json.loads(path.read_text())
+              if record.get("schema") == "k16-primitive-sms-result-v1":
+                  records.append(record)
+          records.sort(key=lambda r: (r["lane"], r["box"]))
+          by_lane = defaultdict(list)
+          for record in records:
+              by_lane[record["lane"]].append(record)
+          lane_summary = {
+              lane: {
+                  "returned": len(items),
+                  "statuses": dict(Counter(r["status"] for r in items)),
+                  "total_solver_seconds": round(
+                      sum(float(r["seconds"]) for r in items), 3
+                  ),
+                  "exact_closed_boxes": sorted(
+                      r["box"] for r in items if r["status"] == "UNSAT"
+                  ),
+              }
+              for lane, items in sorted(by_lane.items())
+          }
+          verified_sat = [
+              r["slice_id"]
+              for r in records
+              if r["status"] == "SAT" and r.get("verified")
+          ]
+          closed_boxes = sorted({
+              r["box"] for r in records if r["status"] == "UNSAT"
+          })
+          ledger = {
+              "schema": "k16-primitive-sms-formal-ledger-v1",
+              "created_utc": datetime.now(timezone.utc).isoformat(),
+              "expected_records": 9,
+              "observed_records": len(records),
+              "lane_summary": lane_summary,
+              "globally_closed_benchmark_boxes": closed_boxes,
+              "verified_sat_witnesses": verified_sat,
+              "logical_conclusion": (
+                  "SAT_K16_VERIFIED"
+                  if verified_sat
+                  else (
+                      "UNSAT_PRIMITIVE_K16"
+                      if len(records) == 9
+                      and all(r["status"] == "UNSAT" for r in records)
+                      else (
+                          "PRIMITIVE_K16_OPEN"
+                          if any(r["status"] == "UNKNOWN" for r in records)
+                          else "INCOMPLETE"
+                      )
+                  )
+              ),
+              "records": records,
+          }
+          Path("aggregate").mkdir()
+          Path("aggregate/v16-primitive-benchmark.json").write_text(
+              json.dumps(ledger, indent=2) + "\n"
+          )
+          print(json.dumps(ledger, indent=2))
+          with Path(__import__("os").environ["GITHUB_STEP_SUMMARY"]).open("a") as out:
+              print("## v16 primitive full-S16 formal campaign", file=out)
+              print(f"\n- returned: `{len(records)}/9`", file=out)
+              print(f"- verified SAT: `{verified_sat}`", file=out)
+              print(f"- exact closed boxes: `{closed_boxes}`", file=out)
+              print(f"- lanes: `{lane_summary}`", file=out)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v16-primitive-benchmark-ledger
+          path: aggregate/
+          retention-days: 90

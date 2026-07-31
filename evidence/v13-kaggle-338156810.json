@@ -1,0 +1,72 @@
+{
+  "model_version": "k16-pisa-v13-kaggle-adaptive-pilot-20260727",
+  "script_version_id": 338156810,
+  "url": "https://www.kaggle.com/code/chamine/k16-pisa-v13-adaptive-unknown-cubes?scriptVersionId=338156810",
+  "status": "PILOT_COMPLETE",
+  "successful": true,
+  "gpu_used": false,
+  "cpu_workers": 4,
+  "wall_seconds": 1102.057,
+  "coverage": {
+    "cutoff": 64,
+    "canonical_partition_complete": true,
+    "canonical_partition_cubes": 9788,
+    "already_unsat_parent_lines": [8390, 9788],
+    "refined_parent_lines": [1, 1399, 2797, 4195, 5594, 6992],
+    "split_depth": 6,
+    "split_variables": [17, 18, 19, 20, 21, 22],
+    "children_per_parent": 64,
+    "children_total": 384,
+    "parents_closed_this_run": []
+  },
+  "counts": {
+    "sat": 0,
+    "unsat": 85,
+    "unknown": 299,
+    "error": 0
+  },
+  "parents": [
+    {
+      "parent_line": 1,
+      "parent_literals": 76,
+      "counts": {"sat": 0, "unsat": 28, "unknown": 36, "error": 0},
+      "parent_closed": false
+    },
+    {
+      "parent_line": 1399,
+      "parent_literals": 64,
+      "counts": {"sat": 0, "unsat": 0, "unknown": 64, "error": 0},
+      "parent_closed": false
+    },
+    {
+      "parent_line": 2797,
+      "parent_literals": 72,
+      "counts": {"sat": 0, "unsat": 0, "unknown": 64, "error": 0},
+      "parent_closed": false
+    },
+    {
+      "parent_line": 4195,
+      "parent_literals": 64,
+      "counts": {"sat": 0, "unsat": 0, "unknown": 64, "error": 0},
+      "parent_closed": false
+    },
+    {
+      "parent_line": 5594,
+      "parent_literals": 64,
+      "counts": {"sat": 0, "unsat": 0, "unknown": 64, "error": 0},
+      "parent_closed": false
+    },
+    {
+      "parent_line": 6992,
+      "parent_literals": 64,
+      "counts": {"sat": 0, "unsat": 57, "unknown": 7, "error": 0},
+      "parent_closed": false
+    }
+  ],
+  "interpretation": {
+    "no_k16_decision": true,
+    "no_sat_witness": true,
+    "no_parent_fully_closed": true,
+    "remaining_fine_children": 299
+  }
+}

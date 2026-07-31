@@ -1,0 +1,46 @@
+{
+  "schema": "k16-h14-module3-closure-evidence-v1",
+  "created_utc": "2026-07-27T20:17:27.104065+00:00",
+  "target": "h14_p00=(3,1^13)",
+  "github_run": {
+    "id": 30301557437,
+    "url": "https://github.com/lieoric/k16-pisa-terminal-search/actions/runs/30301557437",
+    "head_sha": "6aed95db21896587dfed51dfd9f43aac33f30dca",
+    "conclusion": "success"
+  },
+  "solver": {
+    "name": "SAT Modulo Symmetries",
+    "commit": "464f12f1fd36b496e7ba9dcbb622b079de02dce4",
+    "model_version": "k16-h14-module3-sms-v1-colour-s13-endpoint-20260728",
+    "initial_partition": [1, 13],
+    "timeout_seconds_per_slice": 19200
+  },
+  "partition": {
+    "invariant": "ordinary outdegree of the unique weight-three quotient vertex",
+    "expected_values": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    "disjoint": true,
+    "complete_for_strong_quotients": true
+  },
+  "results": [
+    {"heavy_outdegree": 1, "status": "UNSAT", "seconds": 0.102},
+    {"heavy_outdegree": 2, "status": "UNSAT", "seconds": 0.156},
+    {"heavy_outdegree": 3, "status": "UNSAT", "seconds": 0.950},
+    {"heavy_outdegree": 4, "status": "UNSAT", "seconds": 1.858},
+    {"heavy_outdegree": 5, "status": "UNSAT", "seconds": 4.839},
+    {"heavy_outdegree": 6, "status": "UNSAT", "seconds": 67.113},
+    {"heavy_outdegree": 7, "status": "UNSAT", "seconds": 88.455},
+    {"heavy_outdegree": 8, "status": "UNSAT", "seconds": 64.539},
+    {"heavy_outdegree": 9, "status": "UNSAT", "seconds": 58.581},
+    {"heavy_outdegree": 10, "status": "UNSAT", "seconds": 69.594},
+    {"heavy_outdegree": 11, "status": "UNSAT", "seconds": 58.768},
+    {"heavy_outdegree": 12, "status": "UNSAT", "seconds": 20.038}
+  ],
+  "all_slices_unsat": true,
+  "logical_conclusion": "UNSAT_H14_P00",
+  "graph_theoretic_consequence": "No surviving K16 Pisa tournament has a module of size three.",
+  "workflow_artifacts": {
+    "per_slice": "h14-module3-result-degree-1 through h14-module3-result-degree-12",
+    "aggregate": "h14-module3-coverage-ledger",
+    "retention_days": 90
+  }
+}

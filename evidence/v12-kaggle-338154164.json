@@ -1,0 +1,119 @@
+{
+  "model_version": "k16-pisa-v12-hybrid-benchmark-20260727",
+  "platform": "Kaggle CPU",
+  "script_version_id": 338154164,
+  "notebook": "chamine/k16-pisa-v12-hybrid-sms-endpoint",
+  "status": "BENCHMARK_COMPLETE",
+  "gpu_used": false,
+  "cpu_workers": 4,
+  "notebook_elapsed_seconds": 553.5,
+  "formula_comparison": {
+    "v11_baseline": {
+      "variables": 18972,
+      "clauses": 108411,
+      "min_total_blockers": 10,
+      "endpoint_closures": false
+    },
+    "v12_hybrid": {
+      "variables": 28241,
+      "clauses": 126792,
+      "min_total_blockers": 16,
+      "endpoint_closures": true
+    }
+  },
+  "gates": {
+    "K8": "UNSAT",
+    "K14": "SAT_VERIFIED",
+    "K15": "SAT_VERIFIED",
+    "K8_SMS": "UNSAT"
+  },
+  "partitions": [
+    {
+      "cutoff": 32,
+      "complete": true,
+      "cubes": 476,
+      "seconds": 0.348,
+      "sample": {
+        "size": 8,
+        "timeout_seconds": 30,
+        "sat": 0,
+        "unsat": 1,
+        "unknown": 7,
+        "error": 0
+      }
+    },
+    {
+      "cutoff": 40,
+      "complete": true,
+      "cubes": 1023,
+      "seconds": 0.397,
+      "sample": {
+        "size": 8,
+        "timeout_seconds": 30,
+        "sat": 0,
+        "unsat": 0,
+        "unknown": 8,
+        "error": 0
+      }
+    },
+    {
+      "cutoff": 48,
+      "complete": true,
+      "cubes": 4194,
+      "seconds": 0.529,
+      "sample": {
+        "size": 8,
+        "timeout_seconds": 30,
+        "sat": 0,
+        "unsat": 0,
+        "unknown": 8,
+        "error": 0
+      }
+    },
+    {
+      "cutoff": 56,
+      "complete": true,
+      "cubes": 9634,
+      "seconds": 1.344,
+      "sample": {
+        "size": 8,
+        "timeout_seconds": 30,
+        "sat": 0,
+        "unsat": 0,
+        "unknown": 8,
+        "error": 0
+      }
+    },
+    {
+      "cutoff": 64,
+      "complete": true,
+      "cubes": 9788,
+      "seconds": 1.17,
+      "sample": {
+        "size": 8,
+        "timeout_seconds": 30,
+        "sat": 0,
+        "unsat": 2,
+        "unknown": 6,
+        "error": 0,
+        "fast_unsat": [
+          {
+            "cube_line": 9788,
+            "seconds": 0.654
+          },
+          {
+            "cube_line": 8390,
+            "seconds": 3.968
+          }
+        ]
+      }
+    }
+  ],
+  "recommended_cutoff": 64,
+  "interpretation": [
+    "No K16 Pisa witness was found.",
+    "Every listed SMS partition is complete, but sampled UNKNOWN cubes remain open.",
+    "At cutoff 32 the hybrid reduced the complete partition from the v11 count of 835 cubes to 476 cubes.",
+    "Cutoff 64 was the best sampled split, closing 2 of 8 sampled cubes within 30 seconds."
+  ]
+}
