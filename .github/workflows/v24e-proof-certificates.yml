@@ -24,7 +24,7 @@ concurrency:
 
 env:
   PYTHONUNBUFFERED: "1"
-  V24D_RUN_ID: ${{ inputs.v24d_run_id }}
+  V24D_RUN_ID: ${{ inputs.v24d_run_id || '30602758451' }}
   V24D_SOURCE_COMMIT: 7e639de2d6b68ec903e375c8f05dfa593b89f5d2
   DRAT_TRIM_COMMIT: 2e3b2dc0ecf938addbd779d42877b6ed69d9a985
 
