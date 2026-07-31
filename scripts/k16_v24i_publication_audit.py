@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCHEMA = "k16-v24i-publication-computation-audit-v1"
+SCHEMA = "k16-v24i-publication-computation-audit-v2"
 EXPECTED_PLAN_SCHEMA = "k16-v24f-complete-certificate-plan-v1"
 EXPECTED_RUNS = {
     "v23": "30417759253",
@@ -110,11 +110,11 @@ def cube_sha256(literals: list[int]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def assumption_cnf_sha256_variants(
+def assumption_cnf_payload(
     source: Path,
     cube: list[int],
-) -> set[str]:
-    """Hash the exact LF and CRLF outputs of the historical text writer."""
+) -> list[str]:
+    """Return the logical DIMACS lines for one theorem CNF plus its cube."""
     text = source.read_text(encoding="utf-8")
     lines = text.splitlines()
     if not lines:
@@ -124,18 +124,34 @@ def assumption_cnf_sha256_variants(
         raise RuntimeError(f"invalid DIMACS header: {source}")
     variables = int(match.group(1))
     clauses = int(match.group(2))
-    logical_lines = [
+    return [
         f"p cnf {variables} {clauses + len(cube)}",
         *lines[1:],
         *(f"{literal} 0" for literal in cube),
     ]
+
+
+def assumption_cnf_sha256(
+    source: Path,
+    cube: list[int],
+    newline: str = "\n",
+) -> str:
+    logical_lines = assumption_cnf_payload(source, cube)
+    return hashlib.sha256(
+        (newline.join(logical_lines) + newline).encode("utf-8")
+    ).hexdigest()
+
+
+def assumption_cnf_sha256_variants(
+    source: Path,
+    cube: list[int],
+) -> set[str]:
+    """Hash the exact LF and CRLF outputs of the historical text writer."""
     # Python's text writer uses the host newline convention.  The frozen
     # GitHub run is LF; allowing CRLF also makes the audit locally repeatable
     # on Windows without weakening any content check.
     return {
-        hashlib.sha256(
-            (newline.join(logical_lines) + newline).encode("utf-8")
-        ).hexdigest()
+        assumption_cnf_sha256(source, cube, newline)
         for newline in ("\n", "\r\n")
     }
 
@@ -278,26 +294,35 @@ def validate_manifest(
         formula_hashes[box] = actual_hash
 
     for index, task in enumerate(tasks, start=1):
+        theorem_cnf = source / "boxes" / task["box"] / "enriched.cnf"
         actual_hashes = assumption_cnf_sha256_variants(
-            source / "boxes" / task["box"] / "enriched.cnf",
-            task["cube_literals"],
+            theorem_cnf, task["cube_literals"]
         )
         if task["assumption_cnf_sha256"] not in actual_hashes:
             raise RuntimeError(
                 f"terminal formula {index}/1124 hash mismatch: "
                 f"{task['certificate_task_id']}"
             )
+        task["canonical_assumption_cnf_sha256"] = assumption_cnf_sha256(
+            theorem_cnf, task["cube_literals"]
+        )
 
     logical_terminals = []
-    ignored_fields = {"wave"}
+    ignored_fields = {
+        "wave",
+        "assumption_cnf_sha256",
+        "canonical_assumption_cnf_sha256",
+    }
     for task in sorted(tasks, key=lambda item: item["certificate_task_id"]):
-        logical_terminals.append(
-            {
+        logical_terminal = {
                 key: value
                 for key, value in task.items()
                 if key not in ignored_fields
-            }
-        )
+        }
+        logical_terminal["assumption_cnf_sha256"] = task[
+            "canonical_assumption_cnf_sha256"
+        ]
+        logical_terminals.append(logical_terminal)
     publication_hash = object_sha256(
         {
             "historical_runs": EXPECTED_RUNS,
@@ -347,7 +372,7 @@ def write_terminal_csv(path: Path, tasks: list[dict]) -> None:
                     "cube_depth": task["cube_depth"],
                     "cube_sha256": task["cube_sha256"],
                     "assumption_cnf_sha256": task[
-                        "assumption_cnf_sha256"
+                        "canonical_assumption_cnf_sha256"
                     ],
                     "historical_method": task["historical_method"],
                     "historical_seconds": task["historical_seconds"],

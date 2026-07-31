@@ -19,6 +19,11 @@ binary refinement that replaced an earlier `UNKNOWN`.  It then:
 6. emits `publication-audit.json`, `terminal-formulas.csv`, and checksum
    manifests in a single reproducibility artifact.
 
+Terminal-CNF hashes in the public ledger use canonical LF line endings, while
+the audit accepts and verifies both historical LF and Windows CRLF byte
+representations.  Consequently the publication audit hash is stable across
+the two operating-system newline conventions.
+
 The stable computational statement is:
 
 ```text
