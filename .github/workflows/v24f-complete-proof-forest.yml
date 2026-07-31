@@ -16,6 +16,11 @@ on:
         required: true
         default: "1"
         type: string
+  pull_request:
+    paths:
+      - ".github/workflows/v24f-complete-proof-forest.yml"
+      - "scripts/k16_v24f_full_certificates.py"
+      - "docs/V24F_COMPLETE_PROOF_FOREST.md"
 
 permissions:
   actions: read
@@ -23,7 +28,7 @@ permissions:
 
 concurrency:
   group: >-
-    k16-v24f-${{ inputs.mode }}-${{ inputs.wave }}
+    k16-v24f-${{ inputs.mode || 'pilot' }}-${{ inputs.wave || '1' }}
   cancel-in-progress: false
 
 env:
@@ -33,6 +38,8 @@ env:
   V24C_RUN_ID: "30587970184"
   V24D_RUN_ID: "30602758451"
   DRAT_TRIM_COMMIT: "2e3b2dc0ecf938addbd779d42877b6ed69d9a985"
+  CAMPAIGN_MODE: ${{ inputs.mode || 'pilot' }}
+  CAMPAIGN_WAVE: ${{ inputs.wave || '1' }}
 
 jobs:
   plan:
@@ -183,8 +190,8 @@ jobs:
             --v24d-source prior/v24d-source \
             --v24d-ledger "$v24d_ledger" \
             --checker-root checkers \
-            --mode "${{ inputs.mode }}" \
-            --wave "${{ inputs.wave }}" \
+            --mode "$CAMPAIGN_MODE" \
+            --wave "$CAMPAIGN_WAVE" \
             --output v24f-source \
             --matrix v24f-matrix.json \
             | tee v24f-plan.log
@@ -212,8 +219,8 @@ jobs:
           )
           m = json.loads(Path("v24f-matrix.json").read_text())
           print("## V24-F complete proof-forest plan")
-          print(f"\n- mode: `${{ inputs.mode }}`")
-          print(f"- requested wave: `${{ inputs.wave }}`")
+          print(f"\n- mode: `${{ env.CAMPAIGN_MODE }}`")
+          print(f"- requested wave: `${{ env.CAMPAIGN_WAVE }}`")
           print(f"- selected certificates: `{len(m['include'])}`")
           print(
               f"- complete terminal forest: "
@@ -230,7 +237,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: >-
-            v24f-source-${{ inputs.mode }}-w${{ inputs.wave }}
+            v24f-source-${{ env.CAMPAIGN_MODE }}-w${{ env.CAMPAIGN_WAVE }}
           path: |
             v24f-source/
             v24f-matrix.json
@@ -261,7 +268,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: >-
-            v24f-source-${{ inputs.mode }}-w${{ inputs.wave }}
+            v24f-source-${{ env.CAMPAIGN_MODE }}-w${{ env.CAMPAIGN_WAVE }}
           path: source-download
       - name: Generate and independently check DRAT and LRAT
         shell: bash
@@ -373,7 +380,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: >-
-            v24f-source-${{ inputs.mode }}-w${{ inputs.wave }}
+            v24f-source-${{ env.CAMPAIGN_MODE }}-w${{ env.CAMPAIGN_WAVE }}
           path: source-download
       - uses: actions/download-artifact@v4
         with:
@@ -388,8 +395,8 @@ jobs:
             --aggregate-wave \
             --source source-download/v24f-source \
             --results-root receipts \
-            --mode "${{ inputs.mode }}" \
-            --wave "${{ inputs.wave }}" \
+            --mode "$CAMPAIGN_MODE" \
+            --wave "$CAMPAIGN_WAVE" \
             --workflow-run-id "${{ github.run_id }}" \
             --output final/v24f-wave-ledger.json \
             | tee final/v24f-wave-ledger.log
@@ -408,7 +415,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: >-
-            v24f-wave-ledger-${{ inputs.mode }}-w${{ inputs.wave }}
+            v24f-wave-ledger-${{ env.CAMPAIGN_MODE }}-w${{ env.CAMPAIGN_WAVE }}
           path: final/
           if-no-files-found: error
           retention-days: 90
