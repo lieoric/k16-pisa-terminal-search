@@ -57,6 +57,9 @@ EXPECTED_PRIOR_ROOTS = {"a1_z2", "a2p_z2", "a2p_z3"}
 SPLIT_LEVELS = 3
 CADICAL_SECONDS = 3600
 KISSAT_SECONDS = 3600
+PLAN_FILENAME = "v24c-manifest.json"
+KISSAT_MANIFEST_FILENAME = "v24c-kissat-manifest.json"
+CADICAL_LEDGER_FILENAME = "v24c-cadical-ledger.json"
 
 
 def utc_now() -> str:
@@ -497,7 +500,7 @@ def select_kissat(
     output: Path,
     matrix_dir: Path,
 ) -> dict:
-    plan = load_json(source / "v24c-manifest.json")
+    plan = load_json(source / PLAN_FILENAME)
     expected = {task["task_id"]: task for task in plan["cadical_tasks"]}
     records = collect_records(cadical_results_root)
     by_id = {record["task_id"]: record for record in records}
@@ -550,7 +553,7 @@ def select_kissat(
         )
     output.mkdir(parents=True, exist_ok=True)
     write_json(
-        output / "v24c-kissat-manifest.json",
+        output / KISSAT_MANIFEST_FILENAME,
         {
             "schema": PLAN_SCHEMA,
             "model_version": MODEL_VERSION,
@@ -578,7 +581,7 @@ def select_kissat(
         ),
         "results": sorted(records, key=lambda item: item["task_id"]),
     }
-    write_json(output / "v24c-cadical-ledger.json", ledger)
+    write_json(output / CADICAL_LEDGER_FILENAME, ledger)
     write_group_matrices(matrix_dir, "kissat", tasks)
     print(
         json.dumps(
@@ -604,7 +607,7 @@ def aggregate(
     output: Path,
     workflow_run_id: str | None,
 ) -> dict:
-    plan = load_json(source / "v24c-manifest.json")
+    plan = load_json(source / PLAN_FILENAME)
     cadical = load_json(cadical_ledger_path)
     if cadical.get("schema") != CADICAL_LEDGER_SCHEMA:
         raise RuntimeError("unexpected V24-C CaDiCaL ledger")
