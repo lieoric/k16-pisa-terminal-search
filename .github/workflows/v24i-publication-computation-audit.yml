@@ -1,0 +1,249 @@
+name: K16 v24-I publication computation audit
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/v24i-publication-computation-audit.yml"
+      - "scripts/k16_v24i_publication_audit.py"
+      - "docs/V24I_PUBLICATION_COMPUTATION_AUDIT.md"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: k16-v24i-publication-audit
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  V23_RUN_ID: "30417759253"
+  V24B_RUN_ID: "30490334948"
+  V24C_RUN_ID: "30587970184"
+  V24D_RUN_ID: "30602758451"
+  DRAT_TRIM_COMMIT: "2e3b2dc0ecf938addbd779d42877b6ed69d9a985"
+
+jobs:
+  audit:
+    name: Rebuild and audit the exact 676-leaf computation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements-sat.txt
+      - name: Verify immutable historical run identities
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_run() {
+            local run_id="$1"
+            local expected_sha="$2"
+            local actual_sha conclusion
+            actual_sha="$(
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+                --jq '.head_sha'
+            )"
+            conclusion="$(
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+                --jq '.conclusion'
+            )"
+            test "$actual_sha" = "$expected_sha"
+            test "$conclusion" = "success"
+          }
+          check_run \
+            "$V23_RUN_ID" \
+            "d25d25169f216f36da9c12766493049d376eb0d7"
+          check_run \
+            "$V24B_RUN_ID" \
+            "1ef79e1343ee510247fbfae566741ced4a4acc60"
+          check_run \
+            "$V24C_RUN_ID" \
+            "be45be4731385dfc8d34fa718fccd98b141bc00b"
+          check_run \
+            "$V24D_RUN_ID" \
+            "7e639de2d6b68ec903e375c8f05dfa593b89f5d2"
+      - name: Download V23 final ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v23-cleanup-ledger
+          path: prior/v23-ledger
+          run-id: ${{ env.V23_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download V24-B frozen source
+        uses: actions/download-artifact@v4
+        with:
+          name: v24b-source
+          path: prior/v24b-source
+          run-id: ${{ env.V24B_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download V24-B final ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24b-ledger
+          path: prior/v24b-ledger
+          run-id: ${{ env.V24B_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download V24-C frozen source
+        uses: actions/download-artifact@v4
+        with:
+          name: v24c-source
+          path: prior/v24c-source
+          run-id: ${{ env.V24C_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download V24-C final ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24c-ledger
+          path: prior/v24c-ledger
+          run-id: ${{ env.V24C_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download V24-D frozen source
+        uses: actions/download-artifact@v4
+        with:
+          name: v24d-source
+          path: prior/v24d-source
+          run-id: ${{ env.V24D_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Download V24-D final ledger
+        uses: actions/download-artifact@v4
+        with:
+          name: v24d-ledger
+          path: prior/v24d-ledger
+          run-id: ${{ env.V24D_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Build the pinned checker binaries used by the forest planner
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git init checker-source
+          git -C checker-source remote add origin \
+            https://github.com/marijnheule/drat-trim.git
+          git -C checker-source fetch --depth 1 origin "$DRAT_TRIM_COMMIT"
+          git -C checker-source checkout --detach FETCH_HEAD
+          test "$(git -C checker-source rev-parse HEAD)" = "$DRAT_TRIM_COMMIT"
+          make -C checker-source
+          mkdir -p checkers
+          cp checker-source/drat-trim checker-source/lrat-check checkers/
+      - id: rebuild
+        name: Independently reconstruct the complete historical forest
+        shell: bash
+        run: |
+          set -euo pipefail
+          v23_ledger="$(
+            find prior/v23-ledger -name v23-cleanup-ledger.json \
+              -type f -print -quit
+          )"
+          v24b_ledger="$(
+            find prior/v24b-ledger -name v24b-ledger.json \
+              -type f -print -quit
+          )"
+          v24c_ledger="$(
+            find prior/v24c-ledger -name v24c-ledger.json \
+              -type f -print -quit
+          )"
+          v24d_ledger="$(
+            find prior/v24d-ledger -name v24d-ledger.json \
+              -type f -print -quit
+          )"
+          test -n "$v23_ledger"
+          test -n "$v24b_ledger"
+          test -n "$v24c_ledger"
+          test -n "$v24d_ledger"
+          python scripts/k16_v24f_full_certificates.py \
+            --plan \
+            --v23-ledger "$v23_ledger" \
+            --v24b-source prior/v24b-source \
+            --v24b-ledger "$v24b_ledger" \
+            --v24c-source prior/v24c-source \
+            --v24c-ledger "$v24c_ledger" \
+            --v24d-source prior/v24d-source \
+            --v24d-ledger "$v24d_ledger" \
+            --checker-root checkers \
+            --mode pilot \
+            --wave 1 \
+            --output frozen-source \
+            --matrix ignored-matrix.json \
+            | tee forest-rebuild.log
+          mkdir -p historical-ledgers
+          cp "$v23_ledger" historical-ledgers/v23-cleanup-ledger.json
+          cp "$v24b_ledger" historical-ledgers/v24b-ledger.json
+          cp "$v24c_ledger" historical-ledgers/v24c-ledger.json
+          cp "$v24d_ledger" historical-ledgers/v24d-ledger.json
+          echo "v23_ledger=historical-ledgers/v23-cleanup-ledger.json" \
+            >> "$GITHUB_OUTPUT"
+          echo "v24b_ledger=historical-ledgers/v24b-ledger.json" \
+            >> "$GITHUB_OUTPUT"
+          echo "v24c_ledger=historical-ledgers/v24c-ledger.json" \
+            >> "$GITHUB_OUTPUT"
+          echo "v24d_ledger=historical-ledgers/v24d-ledger.json" \
+            >> "$GITHUB_OUTPUT"
+      - name: Rematerialize and audit all 1124 terminal formulas
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p publication-audit
+          python scripts/k16_v24i_publication_audit.py \
+            --source frozen-source \
+            --v23-ledger "${{ steps.rebuild.outputs.v23_ledger }}" \
+            --v24b-ledger "${{ steps.rebuild.outputs.v24b_ledger }}" \
+            --v24c-ledger "${{ steps.rebuild.outputs.v24c_ledger }}" \
+            --v24d-ledger "${{ steps.rebuild.outputs.v24d_ledger }}" \
+            --output publication-audit \
+            | tee publication-audit/publication-audit.log
+          find frozen-source historical-ledgers \
+            -type f -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > publication-audit/FROZEN_SOURCE_SHA256SUMS
+      - name: Publish the paper-facing verdict
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          record = json.loads(
+              Path("publication-audit/publication-audit.json").read_text()
+          )
+          coverage = record["coverage"]
+          print("## K16 primitive publication computation audit")
+          print(f"\n- conclusion: `{record['logical_conclusion']}`")
+          print(
+              f"- original leaves: "
+              f"`{coverage['covered_original_partition_leaves']} / "
+              f"{coverage['original_partition_leaves']}`"
+          )
+          print(f"- exact terminal formulas: `{coverage['terminal_formulas']}`")
+          print(
+              "- terminal UNKNOWN / SAT / missing: "
+              f"`{coverage['unknown_terminal_formulas']} / "
+              f"{coverage['sat_terminal_formulas']} / "
+              f"{coverage['missing_terminal_formulas']}`"
+          )
+          print(
+              f"- publication audit SHA-256: "
+              f"`{record['publication_audit_sha256']}`"
+          )
+          print(f"\n{record['claim_boundary']}")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v24i-publication-computation-audit
+          path: |
+            publication-audit/
+            frozen-source/
+            historical-ledgers/
+            forest-rebuild.log
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 6

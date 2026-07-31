@@ -548,27 +548,27 @@ must survive the independent transitive-fibre expansion and K16 verifier.
 All fifteen slices `UNSAT` would close every decomposable K16 Pisa witness,
 leaving only the primitive case.
 
-## Complete primitive proof certificates
+## Primitive-search publication audit
 
 The audited V24-D endpoint closes all `676 / 676` original primitive
 partition leaves at solver level. V24-E independently checks DRAT and LRAT
 proofs for the final eight-way refinement.
 
-V24-F reconstructs the entire historical refinement forest, not merely the
-last leaf. The 581 direct V23 closures and the complete V24-B, V24-C, and
-V24-D replacement trees produce 1,124 terminal UNSAT formulas. The workflow
-checks every historical hash and binary-tree polarity, then regenerates a
-CaDiCaL DRAT proof, validates it with pinned `drat-trim`, derives LRAT, and
-validates LRAT separately for every terminal.
+V24-I is the paper-facing reproducibility path. It reconstructs the entire
+historical refinement forest: the 581 direct V23 closures and the complete
+V24-B, V24-C, and V24-D replacement trees produce 1,124 terminal formulas
+(1,119 exact solver `UNSAT` results plus five unit-propagation
+contradictions). It checks every historical ledger hash, binary-tree polarity,
+solver provenance, theorem CNF, and regenerated terminal-CNF hash, then emits
+one compact audit artifact with no terminal `UNKNOWN`, `SAT`, or missing
+record.
 
-Formal waves publish the checked LRAT payloads and their frozen source bundle
-to six wave-specific GitHub Releases. Actions artifacts carry only the compact
-receipts and ledgers. The final V24-G ledger binds all 1,124 terminal receipts,
-the six release tags, and all 676 original V23 leaves to one deterministic
-forest hash.
+V24-F/G remain optional machinery for producing per-leaf LRAT certificates.
+They are not required for the ordinary computer-assisted mathematics claim
+made by V24-I.
 
 See:
 
-- `.github/workflows/v24f-complete-proof-forest.yml`;
-- `scripts/k16_v24f_full_certificates.py`;
-- `docs/V24F_COMPLETE_PROOF_FOREST.md`.
+- `.github/workflows/v24i-publication-computation-audit.yml`;
+- `scripts/k16_v24i_publication_audit.py`;
+- `docs/V24I_PUBLICATION_COMPUTATION_AUDIT.md`.
