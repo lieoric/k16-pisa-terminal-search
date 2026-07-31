@@ -547,3 +547,22 @@ result is permanent; every timeout remains `UNKNOWN`; and every SAT result
 must survive the independent transitive-fibre expansion and K16 verifier.
 All fifteen slices `UNSAT` would close every decomposable K16 Pisa witness,
 leaving only the primitive case.
+
+## Complete primitive proof certificates
+
+The audited V24-D endpoint closes all `676 / 676` original primitive
+partition leaves at solver level. V24-E independently checks DRAT and LRAT
+proofs for the final eight-way refinement.
+
+V24-F reconstructs the entire historical refinement forest, not merely the
+last leaf. The 581 direct V23 closures and the complete V24-B, V24-C, and
+V24-D replacement trees produce 1,124 terminal UNSAT formulas. The workflow
+checks every historical hash and binary-tree polarity, then regenerates a
+CaDiCaL DRAT proof, validates it with pinned `drat-trim`, derives LRAT, and
+validates LRAT separately for every terminal.
+
+See:
+
+- `.github/workflows/v24f-complete-proof-forest.yml`;
+- `scripts/k16_v24f_full_certificates.py`;
+- `docs/V24F_COMPLETE_PROOF_FOREST.md`.
